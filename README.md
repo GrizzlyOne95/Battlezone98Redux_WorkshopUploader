@@ -13,7 +13,8 @@ A dedicated GUI tool for uploading and managing Steam Workshop mods for **Battle
 ## What can this app NOT do? 
 * **Can't set tags**: Only official app ID's are allowed to set tags on mods, so this cannot because it just uses SteamCMD.
 * **Can't be officially supported**: This is a community made, unofficial app. However, the official app has 0 support or development anymore either.
-* **Can't stop dumb mistakes**: You're still responsible for what you upload to the workshop. This app won't fully prevent you from finding a way to upload a bad mod that causes errors or game crashes. 
+* **Can't stop dumb mistakes**: You're still responsible for what you upload to the workshop. This app won't fully prevent you from finding a way to upload a bad mod that causes errors or game crashes.
+* **Can't run fully independently**: This requires SteamCMD to be present on your PC, otherwise it won't work. 
 
 <img width="1002" height="832" alt="image" src="https://github.com/user-attachments/assets/ae9e3ed0-c82a-44fe-ad45-8ba4916b58c3" />
 
