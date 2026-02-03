@@ -10,7 +10,6 @@ from tkinter import ttk, filedialog, messagebox
 import ctypes
 import re
 import requests
-import struct
 
 try:
     from PIL import Image
@@ -460,26 +459,7 @@ class WorkshopUploader:
                                         issues.append((path, "Invalid Header", header, i+1))
                                 
                                 elif '=' in line and current_header:
-                                    parts = line.split('=', 1)
-                                    key = parts[0].strip()
-                                    val = parts[1].strip() if len(parts) > 1 else ""
-
-                                    # --- CRASH PREVENTION CHECKS ---
-                                    # 1. WeaponMask Crash (weaponMask=00000 causes crash on follow)
-                                    if key.lower() == "weaponmask" and val.replace('"', '').replace("'", "").strip() in ["00000", "0"]:
-                                         issues.append((path, "Crash Risk", "weaponMask=00000 causes crash on follow commands.", i+1))
-                                    
-                                    # 2. Pilot Hardpoint Crash (Hardpoints inside CraftClass)
-                                    if current_header.lower() == "craftclass" and "hardpoint" in key.lower():
-                                         issues.append((path, "Crash Risk", f"Hardpoint '{key}' defined in [CraftClass]. Move to [GameObjectClass].", i+1))
-
-                                    # 3. Magnet Division by Zero
-                                    if current_header.lower() == "magnetclass" and key.lower() == "range":
-                                        try:
-                                            if float(val) == 0.0:
-                                                issues.append((path, "Crash Risk", "Magnet range=0 causes Division by Zero.", i+1))
-                                        except: pass
-
+                                    key = line.split('=')[0].strip()
                                     if current_header in allowed_params:
                                         if key not in allowed_params[current_header]:
                                             issues.append((path, "Unknown Field", f"[{current_header}] {key}", i+1))
@@ -498,12 +478,12 @@ class WorkshopUploader:
 
     def show_safety_warning(self, issues):
         win = tk.Toplevel(self.root)
-        win.title("Safety Check - Issues Found")
+        win.title("Safety Check - Suspicious ODF Headers")
         win.geometry("700x500")
         win.configure(bg="#1a1a1a")
 
         ttk.Label(win, text="⚠️ SECURITY WARNING", font=("Consolas", 14, "bold"), foreground="orange", background="#1a1a1a").pack(pady=(10, 5))
-        ttk.Label(win, text="The following files contain potential issues.", foreground="#d4d4d4", background="#1a1a1a").pack()
+        ttk.Label(win, text="The following ODF files contain unrecognized headers.", foreground="#d4d4d4", background="#1a1a1a").pack()
         
         tree_frame = ttk.Frame(win)
         tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
@@ -554,58 +534,9 @@ class WorkshopUploader:
         self.root.wait_window(win)
         return getattr(win, 'result', False)
 
-    def scan_material_safety(self, mod_dir):
-        issues = []
-        defined_materials = {} # name -> path
-        
-        for root, _, files in os.walk(mod_dir):
-            for file in files:
-                if file.lower().endswith(".material"):
-                    path = os.path.join(root, file)
-                    try:
-                        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                            for i, line in enumerate(f):
-                                line = line.split('//')[0].strip()
-                                if line.startswith("material "):
-                                    parts = line.split()
-                                    if len(parts) >= 2:
-                                        mat_name = parts[1]
-                                        if mat_name in defined_materials:
-                                            prev = defined_materials[mat_name]
-                                            issues.append((path, "Crash Risk", f"Duplicate material '{mat_name}' (also in {os.path.basename(prev)})", i+1))
-                                        else:
-                                            defined_materials[mat_name] = path
-                    except Exception as e:
-                        self.log(f"Warning: Could not scan material {file}: {e}")
-        return issues
-
-    def scan_bmp_safety(self, mod_dir):
-        issues = []
-        for root, _, files in os.walk(mod_dir):
-            for file in files:
-                if file.lower().endswith(".bmp"):
-                    path = os.path.join(root, file)
-                    try:
-                        with open(path, 'rb') as f:
-                            header = f.read(54)
-                            if len(header) < 54: continue
-                            
-                            if header[0:2] != b'BM': continue
-                            
-                            dib_size = struct.unpack('<I', header[14:18])[0]
-                            bit_count = struct.unpack('<H', header[28:30])[0]
-                            
-                            if bit_count != 24:
-                                issues.append((path, "BMP Format", f"Invalid Bit Depth: {bit_count} (Must be 24-bit)", 0))
-                            elif dib_size > 40:
-                                issues.append((path, "Crash Risk", f"Complex Header ({dib_size} bytes). Export with 'Do not write color space'.", 0))
-                                
-                    except Exception as e:
-                        self.log(f"Warning: Could not scan BMP {file}: {e}")
-        return issues
-
     def scan_trn_safety(self, mod_dir):
-        issues = []
+        le_issues = []
+        dup_issues = []
         for root, _, files in os.walk(mod_dir):
             for file in files:
                 if file.lower().endswith(".trn"):
@@ -615,10 +546,15 @@ class WorkshopUploader:
                             text = f.read()
                         
                         if re.search(r'(?<!\r)\n', text) or re.search(r'\r(?!\n)', text):
-                            issues.append(path)
+                            le_issues.append(path)
+                        
+                        # Check for duplicate [Size] headers
+                        if len(re.findall(r'^\s*\[Size\]', text, re.MULTILINE | re.IGNORECASE)) > 1:
+                            dup_issues.append(path)
+                            
                     except Exception as e:
                         self.log(f"Warning: Could not scan TRN {file}: {e}")
-        return issues
+        return le_issues, dup_issues
 
     def fix_trn_files(self, files):
         count = 0
@@ -637,6 +573,42 @@ class WorkshopUploader:
                 self.log(f"Error fixing {path}: {e}")
         return count
 
+    def fix_trn_duplicates(self, files):
+        count = 0
+        for path in files:
+            try:
+                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                    lines = f.readlines()
+                
+                new_lines = []
+                size_found = False
+                skip_mode = False
+                
+                for line in lines:
+                    # Strip comments for checking
+                    clean = line.split('//')[0].split('--')[0].strip().lower()
+                    
+                    if clean == "[size]":
+                        if size_found:
+                            skip_mode = True
+                        else:
+                            size_found = True
+                            skip_mode = False
+                            new_lines.append(line)
+                    elif clean.startswith("[") and clean.endswith("]"):
+                        skip_mode = False
+                        new_lines.append(line)
+                    else:
+                        if not skip_mode:
+                            new_lines.append(line)
+                            
+                with open(path, 'w', encoding='utf-8') as f:
+                    f.writelines(new_lines)
+                count += 1
+            except Exception as e:
+                self.log(f"Error fixing {path}: {e}")
+        return count
+
     def validate_content_structure(self, mod_dir):
         errors = []
         warnings = []
@@ -646,6 +618,16 @@ class WorkshopUploader:
         except Exception as e:
             errors.append(f"Could not access content folder: {e}")
             return errors, warnings
+
+        # Remove desktop.ini if present
+        for f in files[:]:
+            if f.lower() == "desktop.ini":
+                try:
+                    os.remove(os.path.join(mod_dir, f))
+                    self.log(f"Removed hidden system file: {f}")
+                    files.remove(f)
+                except Exception as e:
+                    self.log(f"Warning: Could not remove {f}: {e}")
 
         ini_files = [f for f in files if f.lower().endswith(".ini") and os.path.isfile(os.path.join(mod_dir, f))]
         
@@ -750,11 +732,8 @@ class WorkshopUploader:
             messagebox.showerror("Error", "SteamCMD executable not found.")
             return
 
-        # Safety Checks (Aggregated)
+        # Safety Check
         issues = self.scan_mod_safety(content)
-        issues.extend(self.scan_material_safety(content))
-        issues.extend(self.scan_bmp_safety(content))
-        
         if issues:
             if not self.show_safety_warning(issues): return
 
@@ -767,14 +746,25 @@ class WorkshopUploader:
             if not messagebox.askyesno("Validation Warnings", "Content Validation Warnings:\n\n" + "\n".join(val_warnings) + "\n\nContinue upload anyway?"):
                 return
 
-        # TRN Line Ending Check
-        trn_issues = self.scan_trn_safety(content)
-        if trn_issues:
+        # TRN Checks
+        le_issues, dup_issues = self.scan_trn_safety(content)
+        
+        if dup_issues:
+             if messagebox.askyesno("TRN Format Warning", 
+                                   f"Found {len(dup_issues)} .trn files with duplicate [Size] headers.\n"
+                                   "This causes map loading errors.\n"
+                                   "Would you like to automatically remove the duplicates (keeping the top one)?", icon='warning'):
+                fixed_count = self.fix_trn_duplicates(dup_issues)
+                messagebox.showinfo("Fixed", f"Fixed duplicate headers in {fixed_count} files.")
+             elif not messagebox.askyesno("Confirm Upload", "Uploading with duplicate TRN headers will likely break the map.\nContinue anyway?"):
+                return
+
+        if le_issues:
             if messagebox.askyesno("TRN Format Warning", 
-                                   f"Found {len(trn_issues)} .trn files with incorrect line endings.\n"
+                                   f"Found {len(le_issues)} .trn files with incorrect line endings.\n"
                                    "The game requires CRLF (Windows) line endings.\n"
                                    "Would you like to automatically fix them?", icon='warning'):
-                fixed_count = self.fix_trn_files(trn_issues)
+                fixed_count = self.fix_trn_files(le_issues)
                 messagebox.showinfo("Fixed", f"Corrected line endings in {fixed_count} files.")
             elif not messagebox.askyesno("Confirm Upload", "Uploading with incorrect TRN line endings may cause bugs.\nContinue anyway?"):
                 return
