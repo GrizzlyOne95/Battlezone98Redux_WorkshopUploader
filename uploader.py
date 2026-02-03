@@ -64,6 +64,9 @@ class WorkshopUploader:
             self.base_dir = os.path.dirname(os.path.abspath(__file__))
             self.resource_dir = self.base_dir
             
+        self.profiles_dir = os.path.join(self.base_dir, "profiles")
+        os.makedirs(self.profiles_dir, exist_ok=True)
+            
         self.temp_dir = os.path.join(self.base_dir, "temp_previews")
         os.makedirs(self.temp_dir, exist_ok=True)
 
@@ -234,35 +237,45 @@ class WorkshopUploader:
         mod_frame = ttk.LabelFrame(parent_tab, text=" MOD DETAILS ", padding=10)
         mod_frame.pack(fill="both", expand=True, pady=10)
         
+        # Profile Controls
+        prof_frame = ttk.Frame(mod_frame)
+        prof_frame.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
+        ttk.Button(prof_frame, text="LOAD PROFILE", command=self.load_profile).pack(side="left")
+        ttk.Button(prof_frame, text="SAVE PROFILE", command=self.save_profile).pack(side="left", padx=5)
+        
         # Content Path
-        ttk.Label(mod_frame, text="Content Folder:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(mod_frame, textvariable=self.mod_path).grid(row=0, column=1, sticky="ew", padx=5)
-        ttk.Button(mod_frame, text="BROWSE", command=self.browse_content).grid(row=0, column=2)
+        ttk.Label(mod_frame, text="Content Folder:").grid(row=1, column=0, sticky="w")
+        ttk.Entry(mod_frame, textvariable=self.mod_path).grid(row=1, column=1, sticky="ew", padx=5)
+        
+        cf_btn_frame = ttk.Frame(mod_frame)
+        cf_btn_frame.grid(row=1, column=2)
+        ttk.Button(cf_btn_frame, text="BROWSE", command=self.browse_content).pack(side="left")
+        ttk.Button(cf_btn_frame, text="ANALYZE", width=8, command=self.analyze_memory_usage).pack(side="left", padx=2)
         
         # Preview Image
-        ttk.Label(mod_frame, text="Preview Image:").grid(row=1, column=0, sticky="w", pady=5)
-        ttk.Entry(mod_frame, textvariable=self.preview_path).grid(row=1, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(mod_frame, text="BROWSE", command=self.browse_preview).grid(row=1, column=2, pady=5)
+        ttk.Label(mod_frame, text="Preview Image:").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Entry(mod_frame, textvariable=self.preview_path).grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        ttk.Button(mod_frame, text="BROWSE", command=self.browse_preview).grid(row=2, column=2, pady=5)
         
         # Title
-        ttk.Label(mod_frame, text="Title:").grid(row=2, column=0, sticky="w")
-        ttk.Entry(mod_frame, textvariable=self.title_var).grid(row=2, column=1, columnspan=2, sticky="ew", padx=5)
+        ttk.Label(mod_frame, text="Title:").grid(row=3, column=0, sticky="w")
+        ttk.Entry(mod_frame, textvariable=self.title_var).grid(row=3, column=1, columnspan=2, sticky="ew", padx=5)
         
         self.title_char_label = ttk.Label(mod_frame, text=f"0 / {STEAM_TITLE_LIMIT}")
-        self.title_char_label.grid(row=2, column=3, sticky="w", padx=5)
+        self.title_char_label.grid(row=3, column=3, sticky="w", padx=5)
         
         # Description
-        ttk.Label(mod_frame, text="Description:").grid(row=3, column=0, sticky="nw", pady=5)
+        ttk.Label(mod_frame, text="Description:").grid(row=4, column=0, sticky="nw", pady=5)
         self.desc_text = tk.Text(mod_frame, height=5, bg="#1a1a1a", fg=self.colors["accent"], insertbackground=self.colors["highlight"], font=("Consolas", 10))
-        self.desc_text.grid(row=3, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+        self.desc_text.grid(row=4, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
         self.desc_text.bind("<KeyRelease>", self._update_desc_counter)
         
         self.desc_char_label = ttk.Label(mod_frame, text=f"0 / {STEAM_DESC_LIMIT}")
-        self.desc_char_label.grid(row=3, column=3, sticky="nw", pady=5, padx=5)
+        self.desc_char_label.grid(row=4, column=3, sticky="nw", pady=5, padx=5)
         
         # Metadata Row
         meta_row = ttk.Frame(mod_frame)
-        meta_row.grid(row=4, column=0, columnspan=3, sticky="ew", pady=5)
+        meta_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=5)
         
         ttk.Label(meta_row, text="Visibility:").pack(side="left")
         ttk.Combobox(meta_row, textvariable=self.visibility_var, values=["0 (Public)", "1 (Friends)", "2 (Private)"], state="readonly", width=15).pack(side="left", padx=5)
@@ -357,6 +370,45 @@ class WorkshopUploader:
         except Exception as e: self.log(f"Error resizing image: {e}")
         return None
 
+    def save_profile(self):
+        f = filedialog.asksaveasfilename(initialdir=self.profiles_dir, defaultextension=".json", filetypes=[("JSON Profile", "*.json")])
+        if not f: return
+        
+        data = {
+            "mod_path": self.mod_path.get(),
+            "preview_path": self.preview_path.get(),
+            "title": self.title_var.get(),
+            "description": self.desc_text.get("1.0", "end-1c"),
+            "visibility": self.visibility_var.get(),
+            "item_id": self.item_id_var.get(),
+            "change_note": self.note_var.get()
+        }
+        try:
+            with open(f, 'w') as outfile:
+                json.dump(data, outfile, indent=4)
+            self.log(f"Profile saved: {os.path.basename(f)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to save profile: {e}")
+
+    def load_profile(self):
+        f = filedialog.askopenfilename(initialdir=self.profiles_dir, filetypes=[("JSON Profile", "*.json")])
+        if not f: return
+        
+        try:
+            with open(f, 'r') as infile:
+                data = json.load(infile)
+                self.mod_path.set(data.get("mod_path", ""))
+                self.preview_path.set(data.get("preview_path", ""))
+                self.title_var.set(data.get("title", ""))
+                self.desc_text.delete("1.0", "end")
+                self.desc_text.insert("1.0", data.get("description", ""))
+                self.visibility_var.set(data.get("visibility", "0 (Public)"))
+                self.item_id_var.set(data.get("item_id", "0"))
+                self.note_var.set(data.get("change_note", ""))
+            self.log(f"Profile loaded: {os.path.basename(f)}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load profile: {e}")
+
     def log(self, msg):
         self.root.after(0, lambda: self._log_impl(msg))
 
@@ -391,6 +443,78 @@ class WorkshopUploader:
                         new_path = self.resize_preview_image(f)
                         if new_path: self.preview_path.set(new_path)
             except Exception as e: self.log(f"Image size check failed: {e}")
+
+    def analyze_memory_usage(self):
+        mod_dir = self.mod_path.get()
+        if not mod_dir or not os.path.exists(mod_dir):
+            messagebox.showerror("Error", "Please select a valid content folder first.")
+            return
+
+        self.log("Analyzing memory footprint...")
+        
+        stats = {
+            "disk_size": 0,
+            "est_vram": 0,
+            "counts": {"Texture": 0, "Model": 0, "Audio": 0, "Script": 0, "Other": 0}
+        }
+
+        def get_uncompressed_size(path):
+            # 4 bytes per pixel (RGBA) + 33% for Mipmaps
+            try:
+                if HAS_PIL:
+                    with Image.open(path) as img:
+                        return (img.width * img.height * 4) * 1.33
+            except: pass
+            # Fallback: File size * 5 (rough compression ratio estimate for PNG/JPG)
+            return os.path.getsize(path) * 5
+
+        for root, _, files in os.walk(mod_dir):
+            for f in files:
+                path = os.path.join(root, f)
+                try:
+                    size = os.path.getsize(path)
+                    stats["disk_size"] += size
+                    
+                    ext = f.lower().split('.')[-1]
+                    
+                    if ext in ['png', 'tga', 'bmp', 'jpg', 'jpeg', 'tif', 'tiff']:
+                        stats["counts"]["Texture"] += 1
+                        stats["est_vram"] += get_uncompressed_size(path)
+                    elif ext in ['dds']:
+                        stats["counts"]["Texture"] += 1
+                        stats["est_vram"] += size 
+                    elif ext in ['x', 'geo', 'xsi', '3ds']:
+                        stats["counts"]["Model"] += 1
+                        stats["est_vram"] += size * 3 # Rough estimate for vertex buffers
+                    elif ext in ['wav', 'ogg']:
+                        stats["counts"]["Audio"] += 1
+                    elif ext in ['lua', 'odf', 'inf']:
+                        stats["counts"]["Script"] += 1
+                    else:
+                        stats["counts"]["Other"] += 1
+                        
+                except Exception as e:
+                    self.log(f"Skipped {f}: {e}")
+
+        disk_mb = stats["disk_size"] / (1024 * 1024)
+        vram_mb = stats["est_vram"] / (1024 * 1024)
+        
+        report = (
+            f"MEMORY ANALYSIS REPORT\n"
+            f"----------------------\n"
+            f"Total Disk Size: {disk_mb:.2f} MB\n"
+            f"Est. Runtime Memory: {vram_mb:.2f} MB\n\n"
+            f"Asset Breakdown:\n"
+            f"  Textures: {stats['counts']['Texture']}\n"
+            f"  Models: {stats['counts']['Model']}\n"
+            f"  Audio: {stats['counts']['Audio']}\n"
+            f"  Scripts: {stats['counts']['Script']}\n\n"
+            f"NOTE: 'Est. Runtime Memory' assumes non-DDS textures are\n"
+            f"loaded uncompressed (RGBA8888). Use DDS for best performance."
+        )
+        
+        messagebox.showinfo("Memory Analysis", report)
+        self.log(f"Analysis: Disk={disk_mb:.1f}MB, Est.Mem={vram_mb:.1f}MB")
 
     def scan_mod_safety(self, mod_dir):
         allowed_headers = set()
@@ -476,6 +600,40 @@ class WorkshopUploader:
                         self.log(f"Warning: Could not scan {file}: {e}")
         return issues
 
+    def scan_asset_references(self, mod_dir):
+        issues = []
+        existing_files = set()
+        # Index all files in mod directory (lowercase for case-insensitive matching)
+        for root, _, files in os.walk(mod_dir):
+            for f in files:
+                existing_files.add(f.lower())
+
+        for root, _, files in os.walk(mod_dir):
+            for file in files:
+                path = os.path.join(root, file)
+                try:
+                    with open(path, 'r', errors='ignore') as f:
+                        for i, line in enumerate(f):
+                            line = line.split('//')[0].strip()
+                            
+                            # Check ODF geometry/cockpit references
+                            if file.lower().endswith(".odf"):
+                                match = re.search(r'(geometryName|cockpitName|turretName)\s*=\s*"([^"]+)"', line, re.IGNORECASE)
+                                if match:
+                                    asset = match.group(2).lower()
+                                    if asset and asset not in existing_files:
+                                        issues.append((path, "Missing Asset", f"Missing {match.group(1)}: {asset}", i+1))
+                            
+                            # Check Material texture references
+                            elif file.lower().endswith(".material"):
+                                match = re.search(r'texture\s+([^\s]+)', line, re.IGNORECASE)
+                                if match:
+                                    asset = match.group(1).lower()
+                                    if asset and asset not in existing_files:
+                                        issues.append((path, "Missing Asset", f"Missing texture: {asset}", i+1))
+                except: pass
+        return issues
+
     def show_safety_warning(self, issues):
         win = tk.Toplevel(self.root)
         win.title("Safety Check - Suspicious ODF Headers")
@@ -522,10 +680,19 @@ class WorkshopUploader:
             win.result = True
             win.destroy()
 
+        def on_quick_fix():
+            count = self.apply_quick_fixes(issues)
+            if count > 0:
+                messagebox.showinfo("Quick Fix", f"Applied fixes to {count} issues.\nPlease re-scan or verify files.")
+                win.destroy()
+            else:
+                messagebox.showinfo("Quick Fix", "No automatic fixes available for these specific issues.")
+
         win.result = False
         btn_frame = ttk.Frame(win)
         btn_frame.pack(fill="x", pady=10, padx=10)
         ttk.Button(btn_frame, text="OPEN SELECTED FILE", command=on_open).pack(side="left")
+        ttk.Button(btn_frame, text="QUICK FIX", command=on_quick_fix).pack(side="left", padx=5)
         ttk.Button(btn_frame, text="CANCEL UPLOAD", command=win.destroy).pack(side="right", padx=5)
         ttk.Button(btn_frame, text="IGNORE & CONTINUE", command=on_continue, style="Success.TButton").pack(side="right")
         
@@ -533,6 +700,34 @@ class WorkshopUploader:
         win.grab_set()
         self.root.wait_window(win)
         return getattr(win, 'result', False)
+
+    def apply_quick_fixes(self, issues):
+        fixed_count = 0
+        for path, issue_type, detail, line_num in issues:
+            try:
+                # Fix 1: WeaponMask Crash
+                if issue_type == "Crash Risk" and "weaponMask" in detail:
+                    with open(path, 'r') as f: lines = f.readlines()
+                    if line_num <= len(lines):
+                        # Replace 00000 with 00001
+                        lines[line_num-1] = re.sub(r'(weaponMask\s*=\s*)["\']?0+["\']?', r'\1"00001"', lines[line_num-1], flags=re.IGNORECASE)
+                        with open(path, 'w') as f: f.writelines(lines)
+                        fixed_count += 1
+                
+                # Fix 2: Missing Fields
+                elif issue_type == "Missing Fields":
+                    # Detail format: "[Header] missing: key1, key2"
+                    match = re.search(r'missing:\s*(.+)', detail)
+                    if match:
+                        keys = [k.strip() for k in match.group(1).split(',')]
+                        with open(path, 'a') as f:
+                            f.write(f"\n// Auto-fixed missing fields\n")
+                            for k in keys:
+                                f.write(f"{k} = 0\n")
+                        fixed_count += 1
+            except Exception as e:
+                self.log(f"Quick Fix failed for {os.path.basename(path)}: {e}")
+        return fixed_count
 
     def scan_trn_safety(self, mod_dir):
         le_issues = []
@@ -555,6 +750,24 @@ class WorkshopUploader:
                     except Exception as e:
                         self.log(f"Warning: Could not scan TRN {file}: {e}")
         return le_issues, dup_issues
+
+    def scan_legacy_files(self, mod_dir):
+        legacy_files = []
+        for root, _, files in os.walk(mod_dir):
+            for f in files:
+                if f.lower().endswith(".map"):
+                    legacy_files.append(os.path.join(root, f))
+        return legacy_files
+
+    def delete_legacy_files(self, files):
+        count = 0
+        for path in files:
+            try:
+                os.remove(path)
+                count += 1
+            except Exception as e:
+                self.log(f"Error deleting {path}: {e}")
+        return count
 
     def fix_trn_files(self, files):
         count = 0
@@ -734,6 +947,7 @@ class WorkshopUploader:
 
         # Safety Check
         issues = self.scan_mod_safety(content)
+        issues.extend(self.scan_asset_references(content))
         if issues:
             if not self.show_safety_warning(issues): return
 
@@ -767,6 +981,19 @@ class WorkshopUploader:
                 fixed_count = self.fix_trn_files(le_issues)
                 messagebox.showinfo("Fixed", f"Corrected line endings in {fixed_count} files.")
             elif not messagebox.askyesno("Confirm Upload", "Uploading with incorrect TRN line endings may cause bugs.\nContinue anyway?"):
+                return
+
+        # Legacy MAP Check
+        legacy_maps = self.scan_legacy_files(content)
+        if legacy_maps:
+            if messagebox.askyesno("Legacy Content Warning", 
+                                   f"Found {len(legacy_maps)} .map files.\n"
+                                   "These are legacy Battlezone 1.5 texture files and are NOT used by Redux.\n"
+                                   "They will increase download size unnecessarily.\n\n"
+                                   "Would you like to automatically delete them?", icon='warning'):
+                deleted_count = self.delete_legacy_files(legacy_maps)
+                messagebox.showinfo("Cleanup Complete", f"Deleted {deleted_count} legacy files.")
+            elif not messagebox.askyesno("Confirm Upload", "Continue upload with legacy files included?"):
                 return
 
         self.save_config()
