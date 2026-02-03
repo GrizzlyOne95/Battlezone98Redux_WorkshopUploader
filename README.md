@@ -2,6 +2,9 @@
 
 A dedicated GUI tool for uploading and managing Steam Workshop mods for **Battlezone 98 Redux**. This tool streamlines the upload process by automating VDF creation, handling SteamCMD execution, and performing extensive safety checks on mod files to prevent common crashes and bugs.
 
+<img width="1002" height="832" alt="image" src="https://github.com/user-attachments/assets/ae9e3ed0-c82a-44fe-ad45-8ba4916b58c3" />
+
+
 ## Features
 
 ### 🚀 Streamlined Uploading
