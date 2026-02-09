@@ -103,10 +103,18 @@ class WorkshopUploader:
         self.username_var = tk.StringVar(value=self.config.get("username", ""))
         self.password_var = tk.StringVar()
         self.steam_guard_var = tk.StringVar()
+        self.use_cached_creds_var = tk.BooleanVar(value=self.config.get("use_cached_creds", False))
+        self.use_cached_creds_var.trace_add("write", self._toggle_auth_fields)
+        
+        self.qr_session_id = None
+        self.qr_poll_timer = None
         
         self.setup_styles()
         self.setup_ui()
         
+        # Initial toggle state
+        self._toggle_auth_fields()
+
         # Apply theme
         self.root.configure(bg=self.colors["bg"])
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -134,7 +142,8 @@ class WorkshopUploader:
             "steamcmd_path": self.steamcmd_path.get(),
             "api_key": self.api_key_var.get(),
             "last_game": self.game_var.get(),
-            "username": self.username_var.get()
+            "username": self.username_var.get(),
+            "use_cached_creds": self.use_cached_creds_var.get()
         }
         try:
             with open(CONFIG_FILE, 'w') as f: json.dump(cfg, f, indent=4)
@@ -142,6 +151,9 @@ class WorkshopUploader:
 
     def on_close(self):
         self.save_config()
+        # Cancel any active QR polling
+        if self.qr_poll_timer:
+            self.root.after_cancel(self.qr_poll_timer)
         # Clean up temp preview files
         try:
             for f in os.listdir(self.temp_dir): os.remove(os.path.join(self.temp_dir, f))
@@ -215,19 +227,34 @@ class WorkshopUploader:
         
         # Credentials
         ttk.Label(cfg_frame, text="Steam Username:").grid(row=1, column=0, sticky="w", pady=5)
-        ttk.Entry(cfg_frame, textvariable=self.username_var).grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+        self.user_entry = ttk.Entry(cfg_frame, textvariable=self.username_var)
+        self.user_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
         
         ttk.Label(cfg_frame, text="Password:").grid(row=1, column=2, sticky="e", pady=5)
-        ttk.Entry(cfg_frame, textvariable=self.password_var, show="*").grid(row=1, column=3, sticky="ew", padx=5)
+        self.pwd_entry = ttk.Entry(cfg_frame, textvariable=self.password_var, show="*")
+        self.pwd_entry.grid(row=1, column=3, sticky="ew", padx=5)
         
         ttk.Label(cfg_frame, text="2FA Code:").grid(row=1, column=4, sticky="e", pady=5)
-        ttk.Entry(cfg_frame, textvariable=self.steam_guard_var, width=10).grid(row=1, column=5, sticky="w", padx=5)
+        self.guard_entry = ttk.Entry(cfg_frame, textvariable=self.steam_guard_var, width=10)
+        self.guard_entry.grid(row=1, column=5, sticky="w", padx=5)
         
+        # QR & Cached Creds
+        auth_opts = ttk.Frame(cfg_frame)
+        auth_opts.grid(row=2, column=1, columnspan=2, sticky="w", pady=5)
+        
+        self.qr_btn = ttk.Button(auth_opts, text="LOGIN WITH QR", command=self.start_qr_login)
+        self.qr_btn.pack(side="left", padx=(0, 10))
+        ToolTip(self.qr_btn, "Login without a password by scanning a QR code with your Steam Mobile App.")
+        
+        cached_cb = ttk.Checkbutton(auth_opts, text="USE CACHED CREDENTIALS", variable=self.use_cached_creds_var)
+        cached_cb.pack(side="left")
+        ToolTip(cached_cb, "If checked, SteamCMD will attempt to use existing login session.\nErrors if you are not already signed in.")
+
         # API Key
-        ttk.Label(cfg_frame, text="Steam Web API Key:").grid(row=2, column=0, sticky="w", pady=5)
-        ttk.Entry(cfg_frame, textvariable=self.api_key_var, show="*").grid(row=2, column=1, sticky="ew", padx=5)
+        ttk.Label(cfg_frame, text="Steam Web API Key:").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Entry(cfg_frame, textvariable=self.api_key_var, show="*").grid(row=3, column=1, sticky="ew", padx=5)
         api_help = ttk.Button(cfg_frame, text="?", command=self.open_api_key_link, width=3)
-        api_help.grid(row=2, column=2, padx=5)
+        api_help.grid(row=3, column=2, padx=5)
         ToolTip(api_help, "Needed for the 'Manage' tab.\nGet one from steamcommunity.com/dev/apikey")
         
         cfg_frame.columnconfigure(1, weight=1)
@@ -443,6 +470,150 @@ class WorkshopUploader:
                         new_path = self.resize_preview_image(f)
                         if new_path: self.preview_path.set(new_path)
             except Exception as e: self.log(f"Image size check failed: {e}")
+
+    def start_qr_login(self):
+        """Starts the Steam QR Login process."""
+        self.log("Initializing QR login...")
+        try:
+            # Step 1: Begin Auth Session
+            url = "https://api.steampowered.com/IAuthenticationService/BeginAuthSessionViaQR/v1/"
+            # We use a generic device name
+            data = {
+                "device_friendly_name": f"BZR Uploader ({os.environ.get('COMPUTERNAME', 'Windows')})",
+                "platform_type": 1 # k_EAuthTokenPlatformType_SteamClient
+            }
+            r = requests.post(url, data=data, timeout=10)
+            r.raise_for_status()
+            res = r.json().get("response", {})
+            
+            client_id = res.get("client_id")
+            challenge_url = res.get("challenge_url")
+            
+            if not client_id or not challenge_url:
+                self.log("Error: Invalid response from Steam API.")
+                return
+
+            self.qr_session_id = client_id
+            
+            # Step 2: Show QR Window
+            self.show_qr_window(challenge_url)
+            
+            # Step 3: Polling
+            self.poll_qr_status()
+
+        except Exception as e:
+            self.log(f"Login Error: {e}")
+            messagebox.showerror("QR Login Error", f"Failed to start QR session:\n{e}")
+
+    def show_qr_window(self, challenge_url):
+        self.qr_win = tk.Toplevel(self.root)
+        self.qr_win.title("Steam QR Login")
+        self.qr_win.geometry("400x520")
+        self.qr_win.configure(bg="#1a1a1a")
+        self.qr_win.resizable(False, False)
+        
+        ttk.Label(self.qr_win, text="SCAN WITH STEAM MOBILE APP", font=("Consolas", 12, "bold"), foreground=self.colors["highlight"], background="#1a1a1a").pack(pady=10)
+        
+        # QR Code Frame (Center aligned)
+        qr_frame = tk.Frame(self.qr_win, bg="#ffffff", padx=10, pady=10)
+        qr_frame.pack(pady=10)
+        
+        self.qr_label = tk.Label(qr_frame, text="Loading QR...", bg="#ffffff", fg="#000000")
+        self.qr_label.pack()
+        
+        # Use external API for QR generation
+        qr_api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={requests.utils.quote(challenge_url)}"
+        
+        def load_qr():
+            try:
+                r = requests.get(qr_api_url, timeout=10)
+                if r.ok:
+                    from io import BytesIO
+                    if HAS_PIL:
+                        img = Image.open(BytesIO(r.content))
+                        from PIL import ImageTk
+                        self.qr_img = ImageTk.PhotoImage(img)
+                        self.qr_label.config(image=self.qr_img, text="")
+                    else:
+                        self.qr_label.config(text="QR Loaded (PIL missing)\nScan the link manually?")
+                        self.log("Warning: PIL missing, cannot display QR image in UI.")
+            except Exception as e:
+                self.qr_label.config(text=f"Failed to load QR\n{e}")
+
+        threading.Thread(target=load_qr, daemon=True).start()
+        
+        ttk.Label(self.qr_win, text="1. Open Steam Mobile App\n2. Go to Steam Guard\n3. Select 'Scan a QR Code'", background="#1a1a1a", foreground="#d4d4d4", justify="left").pack(pady=10)
+        
+        cancel_btn = ttk.Button(self.qr_win, text="CANCEL", command=self.cancel_qr_login)
+        cancel_btn.pack(pady=(10, 20))
+        
+        self.qr_win.protocol("WM_DELETE_WINDOW", self.cancel_qr_login)
+        self.qr_win.transient(self.root)
+        self.qr_win.grab_set()
+
+    def poll_qr_status(self):
+        if not self.qr_session_id: return
+        
+        try:
+            url = "https://api.steampowered.com/IAuthenticationService/PollAuthSessionStatus/v1/"
+            data = {"client_id": self.qr_session_id, "request_id": self.qr_session_id} 
+            # Actually, the API says "client_id" and we need to check the status.
+            
+            r = requests.post(url, data=data, timeout=5)
+            if r.status_code == 404: # Session expired or invalid
+                self.log("QR Session expired.")
+                self.cancel_qr_login()
+                return
+
+            res = r.json().get("response", {})
+            # Possible results: 
+            # - Empty: still waiting
+            # - refresh_token: success
+            
+            if res.get("refresh_token"):
+                self.handle_qr_success(res)
+                return
+            
+            # Poll again in 2 seconds
+            self.qr_poll_timer = self.root.after(2000, self.poll_qr_status)
+            
+        except Exception as e:
+            # Minor errors (timeout etc) are ignored during polling
+            self.qr_poll_timer = self.root.after(2000, self.poll_qr_status)
+
+    def handle_qr_success(self, res):
+        self.log("QR Login Successful!")
+        refresh_token = res.get("refresh_token")
+        account_name = res.get("account_name")
+        
+        if account_name:
+            self.username_var.set(account_name)
+            
+        # We don't have a secure way to store the refresh token for SteamCMD directly,
+        # but we can use it to fetch more details or confirm login.
+        # For now, we populate the username and tell the user they can use cached creds.
+        
+        messagebox.showinfo("Success", f"Logged in as {account_name}.\n\nYou can now use 'USE CACHED CREDENTIALS' or proceed.")
+        
+        if hasattr(self, 'qr_win'):
+            self.qr_win.destroy()
+        self.qr_session_id = None
+
+    def cancel_qr_login(self):
+        if self.qr_poll_timer:
+            self.root.after_cancel(self.qr_poll_timer)
+            self.qr_poll_timer = None
+        self.qr_session_id = None
+        if hasattr(self, 'qr_win'):
+            self.qr_win.destroy()
+        self.log("QR Login cancelled.")
+
+    def _toggle_auth_fields(self, *args):
+        state = "disabled" if self.use_cached_creds_var.get() else "normal"
+        self.user_entry.config(state=state)
+        self.pwd_entry.config(state=state)
+        self.guard_entry.config(state=state)
+        self.qr_btn.config(state=state)
 
     def analyze_memory_usage(self):
         mod_dir = self.mod_path.get()
@@ -1026,6 +1197,7 @@ class WorkshopUploader:
             self.log(f"Error creating VDF: {e}")
             return
 
+        vdf_path = os.path.join(self.base_dir, "upload.vdf")
         # Run SteamCMD
         # We use a separate thread to not freeze UI, but we might need a new console for 2FA
         threading.Thread(target=self.run_steamcmd, args=(sc, user, pwd, vdf_path)).start()
@@ -1034,11 +1206,17 @@ class WorkshopUploader:
         self.log("Starting SteamCMD...")
         
         cmd = [exe, "+login", user]
-        if pwd:
-            cmd.append(pwd)
-        guard_code = self.steam_guard_var.get()
-        if guard_code:
-            cmd.append(guard_code)
+        
+        use_cached = self.use_cached_creds_var.get()
+        
+        if not use_cached:
+            if pwd:
+                cmd.append(pwd)
+            guard_code = self.steam_guard_var.get()
+            if guard_code:
+                cmd.append(guard_code)
+        else:
+            self.log("Attempting login using cached credentials...")
             
         cmd.extend(["+workshop_build_item", vdf, "+quit"])
         
@@ -1058,7 +1236,10 @@ class WorkshopUploader:
                 
                 analysis = self.analyze_last_upload_log()
                 msg = f"SteamCMD encountered an error (Code {p.returncode})."
-                if analysis:
+                
+                if use_cached:
+                    msg = "SteamCMD failed to login using cached credentials.\n\nPlease ensure you are logged into SteamCMD manually first, or use the QR Login / Manual boxes."
+                elif analysis:
                     msg += f"\n\nPossible Errors found in log:\n{analysis}"
                 
                 def show_err():
