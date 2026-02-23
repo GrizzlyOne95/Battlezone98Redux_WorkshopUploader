@@ -2,6 +2,9 @@
 
 A dedicated GUI tool for uploading and managing Steam Workshop mods for **Battlezone 98 Redux**. This tool streamlines the upload process by automating VDF creation, handling SteamCMD execution, and performing extensive safety checks on mod files to prevent common crashes and bugs.
 
+<img width="1002" height="832" alt="image" src="https://github.com/user-attachments/assets/d748e2db-4de6-4b27-9514-87ac8f89f387" />
+
+
 ## Why choose this over the official BZR uploader app? 
 * **No Undocumented or unhelpful errors**: The BZR uploader app is well known to throw strange errors, and since it is not using SteamCMD you do not get any detailed logging.
 * **Much more open**: The BZR uploader app arbitrarily blocks some files from being uploaded as mods, despite them not causing any issues after extensive testing.
@@ -13,9 +16,6 @@ A dedicated GUI tool for uploading and managing Steam Workshop mods for **Battle
 ## What can this app NOT do? 
 *   **Can't be officially supported**: This is a community made, unofficial app. However, the official app has 0 support or development anymore either.
 *   **Can't stop dumb mistakes**: You're still responsible for what you upload to the workshop. This app won't fully prevent you from finding a way to upload a bad mod that causes errors or game crashes.
-
-<img width="1002" height="832" alt="image" src="https://github.com/user-attachments/assets/ae9e3ed0-c82a-44fe-ad45-8ba4916b58c3" />
-
 
 ## Features
 
