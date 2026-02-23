@@ -10,6 +10,8 @@ from tkinter import ttk, filedialog, messagebox
 import ctypes
 import re
 import requests
+import zipfile
+import io
 
 try:
     from PIL import Image
@@ -50,6 +52,135 @@ class ToolTip:
         if self.tip_window:
             self.tip_window.destroy()
             self.tip_window = None
+
+class TemplateWizard(tk.Toplevel):
+    def __init__(self, parent, colors, on_success):
+        super().__init__(parent)
+        self.title("New Project Wizard")
+        self.geometry("500x550")
+        self.configure(bg=colors["bg"])
+        self.colors = colors
+        self.on_success = on_success
+        self.resizable(False, False)
+        
+        # Variables
+        self.name_var = tk.StringVar(value="my_new_map")
+        self.type_var = tk.StringVar(value="multiplayer")
+        self.min_p_var = tk.StringVar(value="2")
+        self.max_p_var = tk.StringVar(value="4")
+        self.game_type_var = tk.StringVar(value="S")
+        
+        self.setup_ui()
+        self.transient(parent)
+        self.grab_set()
+
+    def setup_ui(self):
+        style = ttk.Style()
+        c = self.colors
+        
+        frame = ttk.Frame(self, padding=20)
+        frame.pack(fill="both", expand=True)
+        
+        ttk.Label(frame, text="CREATE NEW BZR PROJECT", font=("Consolas", 14, "bold"), foreground=c["highlight"]).pack(pady=(0, 20))
+        
+        # Name
+        ttk.Label(frame, text="Mission Name:").pack(anchor="w")
+        ttk.Entry(frame, textvariable=self.name_var).pack(fill="x", pady=(0, 15))
+        
+        # Map Type
+        ttk.Label(frame, text="Map Type:").pack(anchor="w")
+        type_combo = ttk.Combobox(frame, textvariable=self.type_var, values=["instant_action", "multiplayer", "mod"], state="readonly")
+        type_combo.pack(fill="x", pady=(0, 15))
+        type_combo.bind("<<ComboboxSelected>>", self._toggle_mp_fields)
+        
+        # MP Specifics
+        self.mp_frame = ttk.LabelFrame(frame, text=" MULTIPLAYER SETTINGS ", padding=10)
+        self.mp_frame.pack(fill="x", pady=5)
+        
+        ttk.Label(self.mp_frame, text="Game Type:").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(self.mp_frame, textvariable=self.game_type_var, values=["D (Deathmatch)", "S (Strategy)", "K (King Of The Hill)", "M (Multiplayer Instant)", "A (Multiplayer Action)"], state="readonly", width=25).grid(row=0, column=1, sticky="ew", padx=5)
+        
+        ttk.Label(self.mp_frame, text="Min Players:").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Entry(self.mp_frame, textvariable=self.min_p_var, width=5).grid(row=1, column=1, sticky="w", padx=5, pady=5)
+        
+        ttk.Label(self.mp_frame, text="Max Players:").grid(row=2, column=0, sticky="w")
+        ttk.Entry(self.mp_frame, textvariable=self.max_p_var, width=5).grid(row=2, column=1, sticky="w", padx=5)
+        
+        # Actions
+        btn_frame = ttk.Frame(frame)
+        btn_frame.pack(fill="x", side="bottom", pady=20)
+        
+        ttk.Button(btn_frame, text="CREATE PROJECT", command=self.create_project, style="Success.TButton").pack(side="right", padx=5)
+        ttk.Button(btn_frame, text="CANCEL", command=self.destroy).pack(side="right")
+
+    def _toggle_mp_fields(self, event=None):
+        if self.type_var.get() == "multiplayer":
+            self.mp_frame.pack(fill="x", pady=5, after=self.mp_frame.master.children.get("type_combo")) # Helper logic
+            # Actually just simple pack/unpack
+            self.mp_frame.pack(fill="x", pady=5)
+        else:
+            self.mp_frame.pack_forget()
+
+    def create_project(self):
+        name = self.name_var.get().strip()
+        if not name:
+            messagebox.showerror("Error", "Project name cannot be empty.")
+            return
+            
+        target_dir = filedialog.askdirectory(title="Select Parent Folder for New Project")
+        if not target_dir: return
+        
+        project_path = os.path.join(target_dir, name)
+        if os.path.exists(project_path):
+            if not messagebox.askyesno("Warning", f"Folder '{name}' already exists. Overwrite?"):
+                return
+        
+        try:
+            os.makedirs(project_path, exist_ok=True)
+            
+            # 1. Create .INI file
+            m_type = self.type_var.get()
+            g_type = self.game_type_var.get()[0]
+            
+            ini_content = f"""[DESCRIPTION]
+missionName = "{name}"
+
+[WORKSHOP]
+mapType = "{m_type}"
+;customtags = ""
+
+"""
+            if m_type == "multiplayer":
+                ini_content += f"""[MULTIPLAYER]
+minPlayers = "{self.min_p_var.get()}"
+maxPlayers = "{self.max_p_var.get()}"
+gameType = "{g_type}"
+; D=Deathmatch, S=Strategy, K=KOTH, M=MP Instant, A=MP Action
+"""
+            
+            with open(os.path.join(project_path, f"{name}.ini"), "w") as f:
+                f.write(ini_content)
+                
+            # 2. Create placeholder map files
+            exts = [".hg2", ".trn", ".mat", ".bzn", ".lgt"]
+            if m_type == "multiplayer":
+                exts.extend([".bmp", ".des", ".vxt"])
+                
+            for ext in exts:
+                with open(os.path.join(project_path, f"{name}{ext}"), "w") as f:
+                    if ext == ".trn":
+                        f.write("[Size]\nTileSize = 8\nSizeX = 128\nSizeZ = 128\n")
+                    elif ext == ".des":
+                        f.write(f"Description for {name}")
+                    else:
+                        f.write("") # Just touch the file
+            
+            self.on_success(project_path)
+            self.destroy()
+            messagebox.showinfo("Success", f"Project '{name}' created successfully!")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create project: {e}")
 
 class WorkshopUploader:
     def __init__(self, root):
@@ -97,6 +228,7 @@ class WorkshopUploader:
         self.title_var.trace_add("write", self._update_title_counter)
         self.desc_var = tk.StringVar()
         self.note_var = tk.StringVar(value="Initial Release")
+        self.tags_var = tk.StringVar()
         self.visibility_var = tk.StringVar(value="0") # 0=Public, 1=Friends, 2=Private
         self.item_id_var = tk.StringVar(value="0")
         
@@ -108,6 +240,10 @@ class WorkshopUploader:
         
         self.qr_session_id = None
         self.qr_poll_timer = None
+        
+        self.watch_mode_var = tk.BooleanVar(value=False)
+        self.watch_thread = None
+        self.last_scan_time = 0
         
         self.setup_styles()
         self.setup_ui()
@@ -224,6 +360,7 @@ class WorkshopUploader:
         ttk.Label(cfg_frame, text="SteamCMD Path:").grid(row=0, column=0, sticky="w")
         ttk.Entry(cfg_frame, textvariable=self.steamcmd_path).grid(row=0, column=1, sticky="ew", padx=5)
         ttk.Button(cfg_frame, text="BROWSE", command=self.browse_steamcmd).grid(row=0, column=2)
+        ttk.Button(cfg_frame, text="AUTO-DOWNLOAD", command=self.download_steamcmd).grid(row=0, column=3, padx=5)
         
         # Credentials
         ttk.Label(cfg_frame, text="Steam Username:").grid(row=1, column=0, sticky="w", pady=5)
@@ -278,6 +415,11 @@ class WorkshopUploader:
         cf_btn_frame.grid(row=1, column=2)
         ttk.Button(cf_btn_frame, text="BROWSE", command=self.browse_content).pack(side="left")
         ttk.Button(cf_btn_frame, text="ANALYZE", width=8, command=self.analyze_memory_usage).pack(side="left", padx=2)
+        ttk.Button(cf_btn_frame, text="NEW...", width=6, command=self.open_template_wizard).pack(side="left")
+        
+        watch_cb = ttk.Checkbutton(cf_btn_frame, text="WATCH", variable=self.watch_mode_var, command=self.toggle_watch_mode)
+        watch_cb.pack(side="left", padx=5)
+        ToolTip(watch_cb, "Live monitoring of the content folder.\nAutomatically scans for errors when files change.")
         
         # Preview Image
         ttk.Label(mod_frame, text="Preview Image:").grid(row=2, column=0, sticky="w", pady=5)
@@ -316,6 +458,13 @@ class WorkshopUploader:
         
         ttk.Label(meta_row, text="Change Note:").pack(side="left", padx=(20, 5))
         ttk.Entry(meta_row, textvariable=self.note_var).pack(side="left", fill="x", expand=True, padx=5)
+        
+        # Tags Row (New)
+        tags_row = ttk.Frame(mod_frame)
+        tags_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=5)
+        ttk.Label(tags_row, text="Tags (comma separated) [EXPERIMENTAL]:").pack(side="left")
+        ttk.Entry(tags_row, textvariable=self.tags_var).pack(side="left", fill="x", expand=True, padx=5)
+        ToolTip(tags_row, "EXPERIMENTAL: Uses Web API to update tags post-upload.\nCommon API keys may lack permissions.\nExamples: Map, Vehicle, Building, Weapon")
         
         mod_frame.columnconfigure(1, weight=1)
 
@@ -408,7 +557,8 @@ class WorkshopUploader:
             "description": self.desc_text.get("1.0", "end-1c"),
             "visibility": self.visibility_var.get(),
             "item_id": self.item_id_var.get(),
-            "change_note": self.note_var.get()
+            "change_note": self.note_var.get(),
+            "tags": self.tags_var.get()
         }
         try:
             with open(f, 'w') as outfile:
@@ -432,6 +582,7 @@ class WorkshopUploader:
                 self.visibility_var.set(data.get("visibility", "0 (Public)"))
                 self.item_id_var.set(data.get("item_id", "0"))
                 self.note_var.set(data.get("change_note", ""))
+                self.tags_var.set(data.get("tags", ""))
             self.log(f"Profile loaded: {os.path.basename(f)}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load profile: {e}")
@@ -448,6 +599,76 @@ class WorkshopUploader:
     def browse_steamcmd(self):
         f = filedialog.askopenfilename(filetypes=[("Executable", "*.exe")])
         if f: self.steamcmd_path.set(f)
+
+    def download_steamcmd(self):
+        if not messagebox.askyesno("Confirm Download", "This will download SteamCMD from Valve's servers and extract it to a 'steamcmd' folder in your app directory. Continue?"):
+            return
+            
+        self.log("Downloading SteamCMD zip...")
+        
+        def _worker():
+            try:
+                url = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip"
+                r = requests.get(url, timeout=30)
+                r.raise_for_status()
+                
+                target_dir = os.path.join(self.base_dir, "steamcmd")
+                os.makedirs(target_dir, exist_ok=True)
+                
+                z = zipfile.ZipFile(io.BytesIO(r.content))
+                z.extractall(target_dir)
+                
+                exe_path = os.path.join(target_dir, "steamcmd.exe")
+                if os.path.exists(exe_path):
+                    self.root.after(0, lambda: self.steamcmd_path.set(exe_path))
+                    self.log("SteamCMD successfully downloaded and extracted.")
+                    self.root.after(0, lambda: messagebox.showinfo("Success", "SteamCMD downloaded and path set automatically."))
+                else:
+                    self.log("Error: steamcmd.exe not found after extraction.")
+                    
+            except Exception as e:
+                self.log(f"Download Error: {e}")
+                self.root.after(0, lambda: messagebox.showerror("Download Error", f"Failed to download SteamCMD: {e}"))
+                
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def open_template_wizard(self):
+        TemplateWizard(self.root, self.colors, on_success=lambda p: self.mod_path.set(p))
+
+    def toggle_watch_mode(self):
+        if self.watch_mode_var.get():
+            self.log("Watch Mode enabled.")
+            if not self.watch_thread or not self.watch_thread.is_alive():
+                self.watch_thread = threading.Thread(target=self._watch_loop, daemon=True)
+                self.watch_thread.start()
+        else:
+            self.log("Watch Mode disabled.")
+
+    def _watch_loop(self):
+        import time
+        while self.watch_mode_var.get():
+            mod_dir = self.mod_path.get()
+            if mod_dir and os.path.exists(mod_dir):
+                try:
+                    current_max_time = 0
+                    for root, _, files in os.walk(mod_dir):
+                        for f in files:
+                            t = os.path.getmtime(os.path.join(root, f))
+                            if t > current_max_time: current_max_time = t
+                    
+                    if self.last_scan_time == 0:
+                        self.last_scan_time = current_max_time
+                    elif current_max_time > self.last_scan_time:
+                        self.last_scan_time = current_max_time
+                        self.log("Change detected! Scanning...")
+                        issues = self.scan_mod_safety(mod_dir)
+                        issues.extend(self.scan_asset_references(mod_dir))
+                        if issues:
+                            self.log(f"Watch Alert: {len(issues)} issues found.")
+                        else:
+                            self.log("Watch: Files verified.")
+                except Exception as e: pass
+            time.sleep(3)
 
     def browse_content(self):
         d = filedialog.askdirectory()
@@ -629,6 +850,9 @@ class WorkshopUploader:
             "counts": {"Texture": 0, "Model": 0, "Audio": 0, "Script": 0, "Other": 0}
         }
 
+        non_dds_textures = []
+        all_files = {} # name_lower: full_path
+        
         def get_uncompressed_size(path):
             # 4 bytes per pixel (RGBA) + 33% for Mipmaps
             try:
@@ -642,6 +866,7 @@ class WorkshopUploader:
         for root, _, files in os.walk(mod_dir):
             for f in files:
                 path = os.path.join(root, f)
+                all_files[f.lower()] = path
                 try:
                     size = os.path.getsize(path)
                     stats["disk_size"] += size
@@ -651,6 +876,7 @@ class WorkshopUploader:
                     if ext in ['png', 'tga', 'bmp', 'jpg', 'jpeg', 'tif', 'tiff']:
                         stats["counts"]["Texture"] += 1
                         stats["est_vram"] += get_uncompressed_size(path)
+                        non_dds_textures.append(f)
                     elif ext in ['dds']:
                         stats["counts"]["Texture"] += 1
                         stats["est_vram"] += size 
@@ -667,6 +893,40 @@ class WorkshopUploader:
                 except Exception as e:
                     self.log(f"Skipped {f}: {e}")
 
+        # --- ORPHAN FINDER ---
+        self.log("Scanning for orphaned files...")
+        referenced = set()
+        # Add the main INI/MAP files as implicitly referenced
+        for f in all_files:
+            if f.endswith(('.ini', '.hg2', '.trn', '.mat', '.bzn', '.lgt')):
+                referenced.add(f)
+
+        asset_exts = ('.hg2', '.trn', '.mat', '.bzn', '.lgt', '.bmp', '.des', '.vxt', 
+                      '.wav', '.ogg', '.tga', '.dds', '.x', '.geo', '.xsi', '.3ds', '.png', '.jpg')
+        
+        for path in all_files.values():
+            ext = os.path.splitext(path)[1].lower()
+            if ext in ('.odf', '.material', '.inf', '.lua', '.ini', '.txt'):
+                try:
+                    with open(path, 'r', errors='ignore') as f:
+                        content = f.read()
+                        # Find potential filenames in quotes or after =
+                        potential = re.findall(r'["\']([^"\'\r\n]+)["\']', content)
+                        potential.extend(re.findall(r'=\s*([\w\.\-]+)', content))
+                        
+                        for p in potential:
+                            p_low = p.lower()
+                            if p_low in all_files:
+                                referenced.add(p_low)
+                            else:
+                                # Check if it's a basename reference (common in ODFs)
+                                for a_ext in asset_exts:
+                                    if f"{p_low}{a_ext}" in all_files:
+                                        referenced.add(f"{p_low}{a_ext}")
+                except: pass
+
+        orphans = [f for f in all_files if f not in referenced and not f.endswith('.ini')]
+        
         disk_mb = stats["disk_size"] / (1024 * 1024)
         vram_mb = stats["est_vram"] / (1024 * 1024)
         
@@ -679,13 +939,28 @@ class WorkshopUploader:
             f"  Textures: {stats['counts']['Texture']}\n"
             f"  Models: {stats['counts']['Model']}\n"
             f"  Audio: {stats['counts']['Audio']}\n"
-            f"  Scripts: {stats['counts']['Script']}\n\n"
-            f"NOTE: 'Est. Runtime Memory' assumes non-DDS textures are\n"
-            f"loaded uncompressed (RGBA8888). Use DDS for best performance."
+            f"  Scripts: {stats['counts']['Script']}\n"
         )
-        
+
+        if non_dds_textures:
+            report += f"\n[!] WARNING: {len(non_dds_textures)} non-DDS textures found.\n"
+            report += "These will consume more VRAM than DDS (DXT) compressed files.\n"
+
+        if orphans:
+            report += f"\n[?] ORPHANS: {len(orphans)} files appear unused:\n"
+            for o in orphans[:10]: report += f"  - {o}\n"
+            if len(orphans) > 10: report += f"  ... and {len(orphans)-10} more.\n"
+            report += "\n(Check carefully before deleting; scripts may use dynamic names.)"
+
+        if vram_mb > 2000:
+            report += f"\n\n[!] CRITICAL: Est. VRAM usage ({vram_mb:.0f}MB) is very high!\n"
+            report += "Battlezone 98 Redux may crash on lower-end hardware."
+        elif vram_mb > 1000:
+            report += f"\n\n[!] WARNING: Est. VRAM usage ({vram_mb:.0f}MB) is high.\n"
+            report += "Consider using DDS (DXT) for large textures."
+
         messagebox.showinfo("Memory Analysis", report)
-        self.log(f"Analysis: Disk={disk_mb:.1f}MB, Est.Mem={vram_mb:.1f}MB")
+        self.log(f"Analysis: Disk={disk_mb:.1f}MB, Est.Mem={vram_mb:.1f}MB, Orphans={len(orphans)}")
 
     def scan_mod_safety(self, mod_dir):
         allowed_headers = set()
@@ -1230,6 +1505,11 @@ class WorkshopUploader:
             if p.returncode == 0:
                 self.log("SteamCMD finished successfully.")
                 self.update_item_id_from_vdf(vdf)
+                
+                # Apply Tags if present
+                if self.tags_var.get().strip():
+                    self.update_workshop_tags()
+                
                 self.root.after(0, lambda: messagebox.showinfo("Success", "SteamCMD process finished.\nCheck the console window for upload status."))
             else:
                 self.log(f"SteamCMD exited with code {p.returncode}")
@@ -1300,6 +1580,41 @@ class WorkshopUploader:
 
         except Exception as e:
             self.root.after(0, lambda: self.log(f"API Error: {e}"))
+
+    def update_workshop_tags(self):
+        """Uses the Steam Web API to set tags on the workshop item."""
+        api_key = self.api_key_var.get()
+        item_id = self.item_id_var.get()
+        tags_str = self.tags_var.get()
+        
+        if not api_key or not item_id or item_id == "0" or not tags_str:
+            return
+            
+        tags = [t.strip() for t in tags_str.split(',') if t.strip()]
+        if not tags: return
+        
+        self.log(f"Updating Workshop tags: {', '.join(tags)}...")
+        
+        def _worker():
+            try:
+                # IPublishedFileService/Update/v1
+                url = "https://api.steampowered.com/IPublishedFileService/Update/v1/"
+                # The API usually expects tags to be passed as tags[0], tags[1]...
+                data = {
+                    "key": api_key,
+                    "publishedfileid": item_id,
+                    "appid": self.games[self.game_var.get()]["appid"],
+                }
+                for i, tag in enumerate(tags):
+                    data[f"tags[{i}]"] = tag
+                
+                r = requests.post(url, data=data, timeout=10)
+                r.raise_for_status()
+                self.log("Workshop tags updated successfully via Web API.")
+            except Exception as e:
+                self.log(f"Tag Update Error: {e}")
+                
+        threading.Thread(target=_worker, daemon=True).start()
 
     def prepare_update(self):
         selected = self.tree.selection()

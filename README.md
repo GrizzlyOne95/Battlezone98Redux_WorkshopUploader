@@ -11,10 +11,8 @@ A dedicated GUI tool for uploading and managing Steam Workshop mods for **Battle
 * **Helps FIX issues, not just warn**: The BZR uploader simply throws an error; this corrects many common issues such as double TRN headers, incorrect line endings, incorrectly formatted .BMP files, hidden desktop.ini files, etc. 
 
 ## What can this app NOT do? 
-* **Can't set tags**: Only official app ID's are allowed to set tags on mods, so this cannot because it just uses SteamCMD.
-* **Can't be officially supported**: This is a community made, unofficial app. However, the official app has 0 support or development anymore either.
-* **Can't stop dumb mistakes**: You're still responsible for what you upload to the workshop. This app won't fully prevent you from finding a way to upload a bad mod that causes errors or game crashes.
-* **Can't run fully independently**: This requires SteamCMD to be present on your PC, otherwise it won't work. 
+*   **Can't be officially supported**: This is a community made, unofficial app. However, the official app has 0 support or development anymore either.
+*   **Can't stop dumb mistakes**: You're still responsible for what you upload to the workshop. This app won't fully prevent you from finding a way to upload a bad mod that causes errors or game crashes.
 
 <img width="1002" height="832" alt="image" src="https://github.com/user-attachments/assets/ae9e3ed0-c82a-44fe-ad45-8ba4916b58c3" />
 
@@ -26,6 +24,8 @@ A dedicated GUI tool for uploading and managing Steam Workshop mods for **Battle
 *   **Auto-VDF Generation**: Automatically generates the required `.vdf` configuration file for Steam Workshop uploads.
 *   **2FA Support**: Built-in support for Steam Guard codes during the login process.
 *   **Preview Image Handling**: Automatically detects if preview images exceed the 1MB limit and offers to resize/compress them.
+*   **Tag Support (Experimental)**: Allows setting Workshop tags using the Steam Web API after a successful upload.
+*   **Template Wizard**: Create new project folders with pre-defined `.ini` structures and placeholder map files.
 
 ### 🛡️ Mod Safety & Validation
 Before uploading, the tool scans your content folder for common errors that cause game crashes or bugs:
@@ -37,17 +37,22 @@ Before uploading, the tool scans your content folder for common errors that caus
     *   **BMP**: Ensures preview images are 24-bit and do not contain color space info (which crashes the game).
     *   **TRN**: Validates and fixes line endings (must be CRLF) to prevent terrain loading issues.
     *   **Materials**: Scans for duplicate material names across files.
+*   **Asset Optimization**:
+    *   **Orphan Finder**: Cross-references assets in `.odf`, `.material`, and scripts to identify unused bloating files.
+    *   **VRAM Budgeting**: Estimates runtime memory usage and warns against high-VRAM textures (suggests DDS conversion).
+    *   **DDS Verification**: Identifies uncompressed texture formats and recommends conversion for performance.
 *   **Structure Validation**: Ensures the mod folder contains a valid `.ini` file and essential map files (`.hg2`, `.trn`, `.mat`, etc.) based on the map type.
 
 ### 🔧 Mod Management
 *   **Manage Tab**: View your existing Workshop items.
 *   **Update Workflow**: Select an existing mod to auto-populate fields for an update.
+*   **Watch Mode**: Monitors your project folder for changes and automatically re-scans for errors.
 *   **Logs**: Built-in log viewer for SteamCMD build and transfer logs to troubleshoot failed uploads.
 
 ## Prerequisites
 
 *   **Python 3.x**
-*   **SteamCMD**: You can point the tool to an existing installation or download it separately.
+*   **SteamCMD**: You can point to an existing installation or use the built-in **AUTO-DOWNLOAD** feature.
 *   **Steam Account**: You must own Battlezone 98 Redux on Steam to upload to its Workshop.
 
 ## Installation
