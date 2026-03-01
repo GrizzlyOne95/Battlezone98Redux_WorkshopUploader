@@ -1049,35 +1049,53 @@ class WorkshopUploader:
     def scan_asset_references(self, mod_dir):
         issues = []
         existing_files = set()
-        # Index all files in mod directory (lowercase for case-insensitive matching)
-        for root, _, files in os.walk(mod_dir):
-            for f in files:
-                existing_files.add(f.lower())
+        files_to_process = []
 
+        # Pre-compile regexes
+        odf_pattern = re.compile(r'(geometryName|cockpitName|turretName)\s*=\s*"([^"]+)"', re.IGNORECASE)
+        material_pattern = re.compile(r'texture\s+([^\s]+)', re.IGNORECASE)
+
+        # Collect existing files and files to process in a single pass
         for root, _, files in os.walk(mod_dir):
-            for file in files:
+            files_in_dir = []
+            for f in files:
+                f_lower = f.lower()
+                existing_files.add(f_lower)
+                # Only track files we actually need to parse
+                if f_lower.endswith(".odf") or f_lower.endswith(".material"):
+                    files_in_dir.append((f, f_lower))
+            if files_in_dir:
+                files_to_process.append((root, files_in_dir))
+
+        # Process collected files
+        for root, files in files_to_process:
+            for file, file_lower in files:
+                is_odf = file_lower.endswith(".odf")
                 path = os.path.join(root, file)
                 try:
-                    with open(path, 'r', errors='ignore') as f:
+                    # Add encoding='utf-8' per memory guidelines
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
                         for i, line in enumerate(f):
-                            line = line.split('//')[0].strip()
+                            # Optimize line parsing: skip split/strip if not needed
+                            if '//' in line:
+                                line = line.split('//')[0]
+                            line = line.strip()
+                            if not line:
+                                continue
                             
-                            # Check ODF geometry/cockpit references
-                            if file.lower().endswith(".odf"):
-                                match = re.search(r'(geometryName|cockpitName|turretName)\s*=\s*"([^"]+)"', line, re.IGNORECASE)
+                            if is_odf:
+                                match = odf_pattern.search(line)
                                 if match:
                                     asset = match.group(2).lower()
                                     if asset and asset not in existing_files:
                                         issues.append((path, "Missing Asset", f"Missing {match.group(1)}: {asset}", i+1))
-                            
-                            # Check Material texture references
-                            elif file.lower().endswith(".material"):
-                                match = re.search(r'texture\s+([^\s]+)', line, re.IGNORECASE)
+                            else:  # is_material
+                                match = material_pattern.search(line)
                                 if match:
                                     asset = match.group(1).lower()
                                     if asset and asset not in existing_files:
                                         issues.append((path, "Missing Asset", f"Missing texture: {asset}", i+1))
-                except: pass
+                except Exception: pass
         return issues
 
     def show_safety_warning(self, issues):
