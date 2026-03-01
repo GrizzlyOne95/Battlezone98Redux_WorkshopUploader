@@ -1547,8 +1547,8 @@ class WorkshopUploader:
             if user_input.isdigit() and len(user_input) == 17:
                 steam_id = user_input
             else: # Assume vanity URL
-                vanity_url = f"http://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/?key={api_key}&vanityurl={user_input}"
-                r = requests.get(vanity_url)
+                vanity_url = f"https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/?key={api_key}&vanityurl={user_input}"
+                r = requests.get(vanity_url, timeout=10)
                 r.raise_for_status()
                 data = r.json().get("response", {})
                 if data.get("success") == 1:
@@ -1565,7 +1565,7 @@ class WorkshopUploader:
                 "key": api_key, "creator_appid": appid, "appid": appid,
                 "numperpage": 100, "return_metadata": 1, "steamid": steam_id
             }
-            r = requests.get(query_url, params=params)
+            r = requests.get(query_url, params=params, timeout=10)
             r.raise_for_status()
             items = r.json().get("response", {}).get("publishedfiledetails", [])
             
@@ -1640,7 +1640,7 @@ class WorkshopUploader:
             preview_url = details.get("preview_url")
             preview_local_path = ""
             if preview_url:
-                img_res = requests.get(preview_url, stream=True)
+                img_res = requests.get(preview_url, stream=True, timeout=10)
                 if img_res.ok:
                     preview_local_path = os.path.join(self.temp_dir, f"{item_id}.jpg")
                     with open(preview_local_path, 'wb') as f: f.write(img_res.content)
