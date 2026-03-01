@@ -84,6 +84,53 @@ class TestWorkshopUploader(unittest.TestCase):
         self.assertEqual(len(dup_issues), 1)
         self.assertEqual(dup_issues[0], dup_size_file)
 
+    def test_scan_trn_safety_edge_cases(self):
+        """Test scan_trn_safety handles CR without LF, case variations, and unreadable files."""
+        # 1. CR without LF
+        bad_le_file_r = os.path.join(self.test_dir, "bad_le_r.trn")
+        with open(bad_le_file_r, "wb") as f:
+            f.write(b"[Size]\rTileSize=8\r")
+
+        # 2. Case insensitive duplicate [Size] headers
+        dup_size_case = os.path.join(self.test_dir, "dup_size_case.trn")
+        with open(dup_size_case, "wb") as f:
+            f.write(b"[size]\r\nTileSize=8\r\n[SIZE]\r\nTileSize=16\r\n")
+
+        # 3. Unreadable file exception (mocking open to throw an exception for a specific file)
+        unreadable_file = os.path.join(self.test_dir, "unreadable.trn")
+        with open(unreadable_file, "wb") as f:
+            f.write(b"dummy")
+
+        # Ensure good file is parsed fine
+        good_trn_file = os.path.join(self.test_dir, "good_edge.trn")
+        with open(good_trn_file, "wb") as f:
+            f.write(b"[Size]\r\nTileSize=8\r\n")
+
+        # Mock builtins.open to throw an exception only for "unreadable.trn"
+        import builtins
+        original_open = builtins.open
+        def mocked_open(file, *args, **kwargs):
+            if file == unreadable_file:
+                raise PermissionError(f"Permission denied: '{file}'")
+            return original_open(file, *args, **kwargs)
+
+        import unittest.mock
+        with unittest.mock.patch('builtins.open', side_effect=mocked_open):
+            le_issues, dup_issues = self.uploader.scan_trn_safety(self.test_dir)
+
+        self.assertIn(bad_le_file_r, le_issues)
+        self.assertIn(dup_size_case, dup_issues)
+
+        # Verify exception block behavior via log
+        self.uploader.log.assert_called()
+        log_calls = self.uploader.log.call_args_list
+        unreadable_logged = any(
+            "Could not scan TRN unreadable.trn" in call.args[0]
+            for call in log_calls
+            if call.args
+        )
+        self.assertTrue(unreadable_logged, "Exception log for unreadable file was not called")
+
     def test_fix_trn_files(self):
         """Test fix_trn_files corrects line endings."""
         bad_le_file = os.path.join(self.test_dir, "bad_le.trn")
