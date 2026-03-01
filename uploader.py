@@ -159,7 +159,7 @@ gameType = "{g_type}"
 ; D=Deathmatch, S=Strategy, K=KOTH, M=MP Instant, A=MP Action
 """
             
-            with open(os.path.join(project_path, f"{name}.ini"), "w") as f:
+            with open(os.path.join(project_path, f"{name}.ini"), "w", encoding="utf-8") as f:
                 f.write(ini_content)
                 
             # 2. Create placeholder map files
@@ -168,7 +168,7 @@ gameType = "{g_type}"
                 exts.extend([".bmp", ".des", ".vxt"])
                 
             for ext in exts:
-                with open(os.path.join(project_path, f"{name}{ext}"), "w") as f:
+                with open(os.path.join(project_path, f"{name}{ext}"), "w", encoding="utf-8") as f:
                     if ext == ".trn":
                         f.write("[Size]\nTileSize = 8\nSizeX = 128\nSizeZ = 128\n")
                     elif ext == ".des":
@@ -201,6 +201,8 @@ class WorkshopUploader:
             
         self.temp_dir = os.path.join(self.base_dir, "temp_previews")
         os.makedirs(self.temp_dir, exist_ok=True)
+
+        self.steamcmd_process = None
 
         # --- THEME & COLORS (Matched to cmd.py) ---
         self.colors = {
@@ -289,8 +291,15 @@ class WorkshopUploader:
     def on_close(self):
         self.save_config()
         # Cancel any active QR polling
-        if self.qr_poll_timer:
+        if getattr(self, "qr_poll_timer", None):
             self.root.after_cancel(self.qr_poll_timer)
+
+        # Kill SteamCMD process if running
+        if self.steamcmd_process and self.steamcmd_process.poll() is None:
+            try:
+                self.steamcmd_process.terminate()
+            except: pass
+
         # Clean up temp preview files
         try:
             for f in os.listdir(self.temp_dir): os.remove(os.path.join(self.temp_dir, f))
@@ -1175,7 +1184,7 @@ class WorkshopUploader:
             try:
                 # Fix 1: WeaponMask Crash
                 if issue_type == "Crash Risk" and "weaponMask" in detail:
-                    with open(path, 'r') as f: lines = f.readlines()
+                    with open(path, 'r', encoding="utf-8", errors="ignore") as f: lines = f.readlines()
                     if line_num <= len(lines):
                         # Replace 00000 with 00001
                         lines[line_num-1] = weapon_mask_re.sub(r'\1"00001"', lines[line_num-1])
@@ -1188,7 +1197,7 @@ class WorkshopUploader:
                     match = missing_fields_re.search(detail)
                     if match:
                         keys = [k.strip() for k in match.group(1).split(',')]
-                        with open(path, 'a') as f:
+                        with open(path, 'a', encoding="utf-8") as f:
                             f.write(f"\n// Auto-fixed missing fields\n")
                             for k in keys:
                                 f.write(f"{k} = 0\n")
@@ -1486,7 +1495,7 @@ class WorkshopUploader:
     "changenote" "{self.note_var.get()}"
 }}
 """
-            with open(vdf_path, "w") as f:
+            with open(vdf_path, "w", encoding="utf-8") as f:
                 f.write(vdf_content)
             self.log(f"Generated VDF at {vdf_path}")
             
@@ -1521,8 +1530,10 @@ class WorkshopUploader:
             # On Windows, CREATE_NEW_CONSOLE allows user to interact (enter 2FA) if needed
             creation_flags = subprocess.CREATE_NEW_CONSOLE if IS_WINDOWS else 0
             
-            p = subprocess.Popen(cmd, creationflags=creation_flags)
-            p.wait()
+            self.steamcmd_process = subprocess.Popen(cmd, creationflags=creation_flags)
+            self.steamcmd_process.wait()
+            p = self.steamcmd_process
+            self.steamcmd_process = None
             
             if p.returncode == 0:
                 self.log("SteamCMD finished successfully.")
