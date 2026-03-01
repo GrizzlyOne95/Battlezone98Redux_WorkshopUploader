@@ -1,4 +1,10 @@
 import sys
+import os
+import unittest
+from unittest.mock import MagicMock
+import tempfile
+
+# Mocking modules before importing uploader to prevent headless import errors
 from unittest.mock import MagicMock
 
 sys.modules['tkinter'] = MagicMock()
