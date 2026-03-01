@@ -1149,6 +1149,9 @@ class WorkshopUploader:
 
     def apply_quick_fixes(self, issues):
         fixed_count = 0
+        weapon_mask_re = re.compile(r'(weaponMask\s*=\s*)["\']?0+["\']?', re.IGNORECASE)
+        missing_fields_re = re.compile(r'missing:\s*(.+)')
+
         for path, issue_type, detail, line_num in issues:
             try:
                 # Fix 1: WeaponMask Crash
@@ -1156,14 +1159,14 @@ class WorkshopUploader:
                     with open(path, 'r') as f: lines = f.readlines()
                     if line_num <= len(lines):
                         # Replace 00000 with 00001
-                        lines[line_num-1] = re.sub(r'(weaponMask\s*=\s*)["\']?0+["\']?', r'\1"00001"', lines[line_num-1], flags=re.IGNORECASE)
+                        lines[line_num-1] = weapon_mask_re.sub(r'\1"00001"', lines[line_num-1])
                         with open(path, 'w') as f: f.writelines(lines)
                         fixed_count += 1
                 
                 # Fix 2: Missing Fields
                 elif issue_type == "Missing Fields":
                     # Detail format: "[Header] missing: key1, key2"
-                    match = re.search(r'missing:\s*(.+)', detail)
+                    match = missing_fields_re.search(detail)
                     if match:
                         keys = [k.strip() for k in match.group(1).split(',')]
                         with open(path, 'a') as f:
