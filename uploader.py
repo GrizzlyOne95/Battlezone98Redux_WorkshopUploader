@@ -12,6 +12,7 @@ import re
 import requests
 import zipfile
 import io
+from datetime import datetime
 
 try:
     from PIL import Image
@@ -1573,7 +1574,6 @@ class WorkshopUploader:
             
             vis_map = {0: "Public", 1: "Friends", 2: "Private"}
             for item in items:
-                from datetime import datetime
                 ts = datetime.fromtimestamp(item['time_updated']).strftime('%Y-%m-%d %H:%M')
                 vis = vis_map.get(item['visibility'], "Unknown")
                 self.root.after(0, lambda i=item, v=vis, t=ts: self.tree.insert("", "end", values=(i['title'], i['publishedfileid'], v, t)))
