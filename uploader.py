@@ -12,6 +12,7 @@ import re
 import requests
 import zipfile
 import io
+from datetime import datetime
 
 try:
     from PIL import Image
@@ -266,13 +267,13 @@ class WorkshopUploader:
                 try:
                     if ctypes.windll.gdi32.AddFontResourceExW(font_path, 0x10, 0) > 0:
                         self.current_font = "BZONE"
-                except: pass
+                except Exception: pass
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, 'r') as f: return json.load(f)
-            except: pass
+            except Exception: pass
         return {}
 
     def save_config(self):
@@ -285,7 +286,7 @@ class WorkshopUploader:
         }
         try:
             with open(CONFIG_FILE, 'w') as f: json.dump(cfg, f, indent=4)
-        except: pass
+        except Exception: pass
 
     def on_close(self):
         self.save_config()
@@ -303,7 +304,7 @@ class WorkshopUploader:
         try:
             for f in os.listdir(self.temp_dir): os.remove(os.path.join(self.temp_dir, f))
             os.rmdir(self.temp_dir)
-        except: pass
+        except Exception: pass
         self.root.destroy()
 
     def setup_styles(self):
@@ -691,7 +692,7 @@ class WorkshopUploader:
                 try:
                     if os.path.getsize(f) > 1024 * 1024:
                         messagebox.showwarning("Image Size", f"Warning: Preview image is > 1MB. PIL library not found for auto-resizing.")
-                except: pass
+                except Exception: pass
                 return
 
             try:
@@ -868,7 +869,7 @@ class WorkshopUploader:
                 if HAS_PIL:
                     with Image.open(path) as img:
                         return (img.width * img.height * 4) * 1.33
-            except: pass
+            except Exception: pass
             # Fallback: File size * 5 (rough compression ratio estimate for PNG/JPG)
             return os.path.getsize(path) * 5
 
@@ -932,7 +933,7 @@ class WorkshopUploader:
                                 for a_ext in asset_exts:
                                     if f"{p_low}{a_ext}" in all_files:
                                         referenced.add(f"{p_low}{a_ext}")
-                except: pass
+                except Exception: pass
 
         orphans = [f for f in all_files if f not in referenced and not f.endswith('.ini')]
         
@@ -1058,35 +1059,53 @@ class WorkshopUploader:
     def scan_asset_references(self, mod_dir):
         issues = []
         existing_files = set()
-        # Index all files in mod directory (lowercase for case-insensitive matching)
-        for root, _, files in os.walk(mod_dir):
-            for f in files:
-                existing_files.add(f.lower())
+        files_to_process = []
 
+        # Pre-compile regexes
+        odf_pattern = re.compile(r'(geometryName|cockpitName|turretName)\s*=\s*"([^"]+)"', re.IGNORECASE)
+        material_pattern = re.compile(r'texture\s+([^\s]+)', re.IGNORECASE)
+
+        # Collect existing files and files to process in a single pass
         for root, _, files in os.walk(mod_dir):
-            for file in files:
+            files_in_dir = []
+            for f in files:
+                f_lower = f.lower()
+                existing_files.add(f_lower)
+                # Only track files we actually need to parse
+                if f_lower.endswith(".odf") or f_lower.endswith(".material"):
+                    files_in_dir.append((f, f_lower))
+            if files_in_dir:
+                files_to_process.append((root, files_in_dir))
+
+        # Process collected files
+        for root, files in files_to_process:
+            for file, file_lower in files:
+                is_odf = file_lower.endswith(".odf")
                 path = os.path.join(root, file)
                 try:
-                    with open(path, 'r', errors='ignore') as f:
+                    # Add encoding='utf-8' per memory guidelines
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
                         for i, line in enumerate(f):
-                            line = line.split('//')[0].strip()
+                            # Optimize line parsing: skip split/strip if not needed
+                            if '//' in line:
+                                line = line.split('//')[0]
+                            line = line.strip()
+                            if not line:
+                                continue
                             
-                            # Check ODF geometry/cockpit references
-                            if file.lower().endswith(".odf"):
-                                match = re.search(r'(geometryName|cockpitName|turretName)\s*=\s*"([^"]+)"', line, re.IGNORECASE)
+                            if is_odf:
+                                match = odf_pattern.search(line)
                                 if match:
                                     asset = match.group(2).lower()
                                     if asset and asset not in existing_files:
                                         issues.append((path, "Missing Asset", f"Missing {match.group(1)}: {asset}", i+1))
-                            
-                            # Check Material texture references
-                            elif file.lower().endswith(".material"):
-                                match = re.search(r'texture\s+([^\s]+)', line, re.IGNORECASE)
+                            else:  # is_material
+                                match = material_pattern.search(line)
                                 if match:
                                     asset = match.group(1).lower()
                                     if asset and asset not in existing_files:
                                         issues.append((path, "Missing Asset", f"Missing texture: {asset}", i+1))
-                except: pass
+                except Exception: pass
         return issues
 
     def show_safety_warning(self, issues):
@@ -1119,7 +1138,7 @@ class WorkshopUploader:
         issue_map = {}
         for path, issue_type, detail, line in issues:
             try: rel_path = os.path.relpath(path, self.mod_path.get())
-            except: rel_path = path
+            except Exception: rel_path = path
             item_id = tree.insert("", "end", values=(rel_path, issue_type, detail, line))
             issue_map[item_id] = path
             
@@ -1158,6 +1177,9 @@ class WorkshopUploader:
 
     def apply_quick_fixes(self, issues):
         fixed_count = 0
+        weapon_mask_re = re.compile(r'(weaponMask\s*=\s*)["\']?0+["\']?', re.IGNORECASE)
+        missing_fields_re = re.compile(r'missing:\s*(.+)')
+
         for path, issue_type, detail, line_num in issues:
             try:
                 # Fix 1: WeaponMask Crash
@@ -1165,14 +1187,14 @@ class WorkshopUploader:
                     with open(path, 'r', encoding="utf-8", errors="ignore") as f: lines = f.readlines()
                     if line_num <= len(lines):
                         # Replace 00000 with 00001
-                        lines[line_num-1] = re.sub(r'(weaponMask\s*=\s*)["\']?0+["\']?', r'\1"00001"', lines[line_num-1], flags=re.IGNORECASE)
-                        with open(path, 'w', encoding="utf-8") as f: f.writelines(lines)
+                        lines[line_num-1] = weapon_mask_re.sub(r'\1"00001"', lines[line_num-1])
+                        with open(path, 'w') as f: f.writelines(lines)
                         fixed_count += 1
                 
                 # Fix 2: Missing Fields
                 elif issue_type == "Missing Fields":
                     # Detail format: "[Header] missing: key1, key2"
-                    match = re.search(r'missing:\s*(.+)', detail)
+                    match = missing_fields_re.search(detail)
                     if match:
                         keys = [k.strip() for k in match.group(1).split(',')]
                         with open(path, 'a', encoding="utf-8") as f:
@@ -1571,38 +1593,19 @@ class WorkshopUploader:
 
             # 2. Query items
             appid = self.games[self.game_var.get()]["appid"]
-            query_url = f"https://api.steampowered.com/IPublishedFileService/GetUserFiles/v1/"
-
-            items = []
-            page = 1
-            while True:
-                params = {
-                    "key": api_key, "appid": appid,
-                    "numperpage": 100, "return_metadata": 1, "steamid": steam_id,
-                    "page": page
-                }
-                r = requests.get(query_url, params=params, timeout=10)
-                r.raise_for_status()
-
-                response_data = r.json().get("response", {})
-                current_items = response_data.get("publishedfiledetails", [])
-
-                if not current_items:
-                    break
-
-                items.extend(current_items)
-
-                total = response_data.get("total", 0)
-                if len(items) >= total:
-                    break
-
-                page += 1
+            query_url = f"https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
+            params = {
+                "key": api_key, "creator_appid": appid, "appid": appid,
+                "numperpage": 100, "return_metadata": 1, "steamid": steam_id
+            }
+            r = requests.get(query_url, params=params, timeout=10)
+            r.raise_for_status()
+            items = r.json().get("response", {}).get("publishedfiledetails", [])
             
             self.root.after(0, lambda: self.tree.delete(*self.tree.get_children()))
             
             vis_map = {0: "Public", 1: "Friends", 2: "Private"}
             for item in items:
-                from datetime import datetime
                 ts = datetime.fromtimestamp(item['time_updated']).strftime('%Y-%m-%d %H:%M')
                 vis = vis_map.get(item['visibility'], "Unknown")
                 self.root.after(0, lambda i=item, v=vis, t=ts: self.tree.insert("", "end", values=(i['title'], i['publishedfileid'], v, t)))
@@ -1669,13 +1672,10 @@ class WorkshopUploader:
             preview_url = details.get("preview_url")
             preview_local_path = ""
             if preview_url:
-                try:
-                    img_res = requests.get(preview_url, stream=True, timeout=15)
-                    if img_res.ok:
-                        preview_local_path = os.path.join(self.temp_dir, f"{item_id}.jpg")
-                        with open(preview_local_path, 'wb') as f: f.write(img_res.content)
-                except Exception as e:
-                    self.log(f"Warning: Failed to download preview image: {e}")
+                img_res = requests.get(preview_url, stream=True, timeout=10)
+                if img_res.ok:
+                    preview_local_path = os.path.join(self.temp_dir, f"{item_id}.jpg")
+                    with open(preview_local_path, 'wb') as f: f.write(img_res.content)
             
             # Map visibility int to combobox string
             vis_map = {0: "0 (Public)", 1: "1 (Friends)", 2: "2 (Private)"}
@@ -1712,7 +1712,7 @@ class WorkshopUploader:
             errors = [l.strip() for l in lines if "error" in l.lower() or "failed" in l.lower()]
             if errors:
                 return "\n".join(errors[-5:]) # Last 5 errors
-        except: pass
+        except Exception: pass
         return None
 
     def show_steam_logs(self):
