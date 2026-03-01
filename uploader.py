@@ -1013,47 +1013,52 @@ class WorkshopUploader:
                 if file.lower().endswith(".odf"):
                     path = os.path.join(root, file)
                     try:
-                        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                            current_header = None
-                            current_header_line = 0
-                            found_params = set()
-
-                            for i, line in enumerate(f):
-                                line = line.split('//')[0].split('--')[0].strip() # Strip comments
-                                if not line: continue
-                                if line.startswith("//") or line.startswith("--"): continue
-                                
-                                if line.startswith('[') and line.endswith(']'):
-                                    # Check previous header for missing params
-                                    if current_header and current_header in allowed_params:
-                                        missing = allowed_params[current_header] - found_params
-                                        if missing:
-                                            issues.append((path, "Missing Fields", f"[{current_header}] missing: {', '.join(missing)}", current_header_line))
-
-                                    header = line[1:-1]
-                                    current_header = header
-                                    current_header_line = i + 1
-                                    found_params = set()
-
-                                    if header not in allowed_headers:
-                                        issues.append((path, "Invalid Header", header, i+1))
-                                
-                                elif '=' in line and current_header:
-                                    key = line.split('=')[0].strip()
-                                    if current_header in allowed_params:
-                                        if key not in allowed_params[current_header]:
-                                            issues.append((path, "Unknown Field", f"[{current_header}] {key}", i+1))
-                                        else:
-                                            found_params.add(key)
-                            
-                            # Check last header
-                            if current_header and current_header in allowed_params:
-                                missing = allowed_params[current_header] - found_params
-                                if missing:
-                                    issues.append((path, "Missing Fields", f"[{current_header}] missing: {', '.join(missing)}", current_header_line))
-
+                        file_issues = self._process_odf_file(path, allowed_headers, allowed_params)
+                        issues.extend(file_issues)
                     except Exception as e:
                         self.log(f"Warning: Could not scan {file}: {e}")
+        return issues
+
+    def _process_odf_file(self, path, allowed_headers, allowed_params):
+        issues = []
+        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+            current_header = None
+            current_header_line = 0
+            found_params = set()
+
+            for i, line in enumerate(f):
+                line = line.split('//')[0].split('--')[0].strip() # Strip comments
+                if not line: continue
+                if line.startswith("//") or line.startswith("--"): continue
+
+                if line.startswith('[') and line.endswith(']'):
+                    # Check previous header for missing params
+                    if current_header and current_header in allowed_params:
+                        missing = allowed_params[current_header] - found_params
+                        if missing:
+                            issues.append((path, "Missing Fields", f"[{current_header}] missing: {', '.join(missing)}", current_header_line))
+
+                    header = line[1:-1]
+                    current_header = header
+                    current_header_line = i + 1
+                    found_params = set()
+
+                    if header not in allowed_headers:
+                        issues.append((path, "Invalid Header", header, i+1))
+
+                elif '=' in line and current_header:
+                    key = line.split('=')[0].strip()
+                    if current_header in allowed_params:
+                        if key not in allowed_params[current_header]:
+                            issues.append((path, "Unknown Field", f"[{current_header}] {key}", i+1))
+                        else:
+                            found_params.add(key)
+
+            # Check last header
+            if current_header and current_header in allowed_params:
+                missing = allowed_params[current_header] - found_params
+                if missing:
+                    issues.append((path, "Missing Fields", f"[{current_header}] missing: {', '.join(missing)}", current_header_line))
         return issues
 
     def scan_asset_references(self, mod_dir):
