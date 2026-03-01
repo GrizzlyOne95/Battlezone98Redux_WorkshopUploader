@@ -112,6 +112,47 @@ class TestWorkshopUploader(unittest.TestCase):
             # Including its content until the next header
             self.assertEqual(content, "[Size]\nTileSize=8\n[Other]\nTest=1\n")
 
+    def test_fix_trn_duplicates_with_comments(self):
+        """Test fix_trn_duplicates handles comments correctly."""
+        dup_size_file = os.path.join(self.test_dir, "dup_size_comments.trn")
+        with open(dup_size_file, "w", encoding="utf-8") as f:
+            f.write("// comment\n[Size] // inline\nTileSize=8\n[size] -- another\nTileSize=16\n[Other]\nTest=1\n")
+
+        fixed_count = self.uploader.fix_trn_duplicates([dup_size_file])
+        self.assertEqual(fixed_count, 1)
+
+        with open(dup_size_file, "r", encoding="utf-8") as f:
+            content = f.read()
+            self.assertEqual(content, "// comment\n[Size] // inline\nTileSize=8\n[Other]\nTest=1\n")
+
+    def test_fix_trn_duplicates_multiple_duplicates(self):
+        """Test fix_trn_duplicates removes multiple duplicate headers."""
+        dup_size_file = os.path.join(self.test_dir, "dup_size_multiple.trn")
+        with open(dup_size_file, "w", encoding="utf-8") as f:
+            f.write("[Size]\nTileSize=8\n[Size]\nTileSize=16\n[Size]\nTileSize=32\n[Other]\nTest=1\n")
+
+        fixed_count = self.uploader.fix_trn_duplicates([dup_size_file])
+        self.assertEqual(fixed_count, 1)
+
+        with open(dup_size_file, "r", encoding="utf-8") as f:
+            content = f.read()
+            self.assertEqual(content, "[Size]\nTileSize=8\n[Other]\nTest=1\n")
+
+    def test_fix_trn_duplicates_exception(self):
+        """Test fix_trn_duplicates handles exceptions gracefully."""
+        # Provide a path that does not exist to cause an open() exception
+        non_existent = os.path.join(self.test_dir, "does_not_exist.trn")
+
+        fixed_count = self.uploader.fix_trn_duplicates([non_existent])
+
+        # Should return 0 since the file couldn't be opened/fixed
+        self.assertEqual(fixed_count, 0)
+
+        # Verify log was called with the correct error
+        self.assertTrue(self.uploader.log.called)
+        log_arg = self.uploader.log.call_args[0][0]
+        self.assertTrue(log_arg.startswith(f"Error fixing {non_existent}:"))
+
     def test_validate_content_structure_missing_ini(self):
         """Test validate_content_structure identifies missing INI files."""
         errors, warnings = self.uploader.validate_content_structure(self.test_dir)
