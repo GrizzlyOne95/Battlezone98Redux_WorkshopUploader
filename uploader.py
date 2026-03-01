@@ -1560,14 +1560,32 @@ class WorkshopUploader:
 
             # 2. Query items
             appid = self.games[self.game_var.get()]["appid"]
-            query_url = f"https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
-            params = {
-                "key": api_key, "creator_appid": appid, "appid": appid,
-                "numperpage": 100, "return_metadata": 1, "steamid": steam_id
-            }
-            r = requests.get(query_url, params=params)
-            r.raise_for_status()
-            items = r.json().get("response", {}).get("publishedfiledetails", [])
+            query_url = f"https://api.steampowered.com/IPublishedFileService/GetUserFiles/v1/"
+
+            items = []
+            page = 1
+            while True:
+                params = {
+                    "key": api_key, "appid": appid,
+                    "numperpage": 100, "return_metadata": 1, "steamid": steam_id,
+                    "page": page
+                }
+                r = requests.get(query_url, params=params)
+                r.raise_for_status()
+
+                response_data = r.json().get("response", {})
+                current_items = response_data.get("publishedfiledetails", [])
+
+                if not current_items:
+                    break
+
+                items.extend(current_items)
+
+                total = response_data.get("total", 0)
+                if len(items) >= total:
+                    break
+
+                page += 1
             
             self.root.after(0, lambda: self.tree.delete(*self.tree.get_children()))
             
