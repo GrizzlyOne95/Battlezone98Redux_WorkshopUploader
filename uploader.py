@@ -914,6 +914,18 @@ class WorkshopUploader:
         asset_exts = ('.hg2', '.trn', '.mat', '.bzn', '.lgt', '.bmp', '.des', '.vxt', 
                       '.wav', '.ogg', '.tga', '.dds', '.x', '.geo', '.xsi', '.3ds', '.png', '.jpg')
         
+        asset_ext_priority = {ext: i for i, ext in enumerate(asset_exts)}
+        best_asset_for_basename = {}
+        for f in all_files:
+            base, ext = os.path.splitext(f)
+            if ext in asset_ext_priority:
+                curr_best = best_asset_for_basename.get(base)
+                if curr_best is None or asset_ext_priority[ext] < asset_ext_priority[os.path.splitext(curr_best)[1]]:
+                    best_asset_for_basename[base] = f
+
+        quote_pattern = re.compile(r'["\']([^"\'\r\n]+)["\']')
+        eq_pattern = re.compile(r'=\s*([\w\.\-]+)')
+
         for path in all_files.values():
             ext = os.path.splitext(path)[1].lower()
             if ext in ('.odf', '.material', '.inf', '.lua', '.ini', '.txt'):
@@ -921,18 +933,15 @@ class WorkshopUploader:
                     with open(path, 'r', errors='ignore') as f:
                         content = f.read()
                         # Find potential filenames in quotes or after =
-                        potential = re.findall(r'["\']([^"\'\r\n]+)["\']', content)
-                        potential.extend(re.findall(r'=\s*([\w\.\-]+)', content))
+                        potential = quote_pattern.findall(content)
+                        potential.extend(eq_pattern.findall(content))
                         
-                        for p in potential:
+                        for p in set(potential):
                             p_low = p.lower()
                             if p_low in all_files:
                                 referenced.add(p_low)
-                            else:
-                                # Check if it's a basename reference (common in ODFs)
-                                for a_ext in asset_exts:
-                                    if f"{p_low}{a_ext}" in all_files:
-                                        referenced.add(f"{p_low}{a_ext}")
+                            elif p_low in best_asset_for_basename:
+                                referenced.add(best_asset_for_basename[p_low])
                 except Exception: pass
 
         orphans = [f for f in all_files if f not in referenced and not f.endswith('.ini')]
