@@ -1566,7 +1566,7 @@ class WorkshopUploader:
                 steam_id = user_input
             else: # Assume vanity URL
                 vanity_url = f"http://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/?key={api_key}&vanityurl={user_input}"
-                r = requests.get(vanity_url)
+                r = requests.get(vanity_url, timeout=10)
                 r.raise_for_status()
                 data = r.json().get("response", {})
                 if data.get("success") == 1:
@@ -1583,7 +1583,7 @@ class WorkshopUploader:
                 "key": api_key, "creator_appid": appid, "appid": appid,
                 "numperpage": 100, "return_metadata": 1, "steamid": steam_id
             }
-            r = requests.get(query_url, params=params)
+            r = requests.get(query_url, params=params, timeout=10)
             r.raise_for_status()
             items = r.json().get("response", {}).get("publishedfiledetails", [])
             
@@ -1646,7 +1646,7 @@ class WorkshopUploader:
         try:
             api_key = self.api_key_var.get()
             url = "https://api.steampowered.com/IPublishedFileService/GetPublishedFileDetails/v1/"
-            r = requests.post(url, data={"key": api_key, "itemcount": 1, "publishedfileids[0]": item_id})
+            r = requests.post(url, data={"key": api_key, "itemcount": 1, "publishedfileids[0]": item_id}, timeout=10)
             r.raise_for_status()
             
             details = r.json().get("response", {}).get("publishedfiledetails", [{}])[0]
@@ -1658,7 +1658,7 @@ class WorkshopUploader:
             preview_url = details.get("preview_url")
             preview_local_path = ""
             if preview_url:
-                img_res = requests.get(preview_url, stream=True)
+                img_res = requests.get(preview_url, stream=True, timeout=10)
                 if img_res.ok:
                     preview_local_path = os.path.join(self.temp_dir, f"{item_id}.jpg")
                     with open(preview_local_path, 'wb') as f: f.write(img_res.content)
