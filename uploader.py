@@ -351,7 +351,12 @@ class WorkshopUploader:
         self.setup_manage_tab(self.manage_tab)
 
     def setup_upload_tab(self, parent_tab):
-        
+        self._setup_header(parent_tab)
+        self._setup_system_config(parent_tab)
+        self._setup_mod_details(parent_tab)
+        self._setup_actions(parent_tab)
+
+    def _setup_header(self, parent_tab):
         # --- HEADER ---
         header = ttk.Frame(parent_tab)
         header.pack(fill="x", pady=(0, 20))
@@ -361,6 +366,8 @@ class WorkshopUploader:
         self.game_combo = ttk.Combobox(header, textvariable=self.game_var, values=list(self.games.keys()), state="readonly", width=10)
         self.game_combo.pack(side="right")
         ttk.Label(header, text="Target Game:").pack(side="right", padx=10)
+
+    def _setup_system_config(self, parent_tab):
 
         # --- CONFIGURATION ---
         cfg_frame = ttk.LabelFrame(parent_tab, text=" SYSTEM CONFIG ", padding=10)
@@ -406,6 +413,8 @@ class WorkshopUploader:
         
         cfg_frame.columnconfigure(1, weight=1)
         cfg_frame.columnconfigure(3, weight=1)
+
+    def _setup_mod_details(self, parent_tab):
 
         # --- MOD DETAILS ---
         mod_frame = ttk.LabelFrame(parent_tab, text=" MOD DETAILS ", padding=10)
@@ -477,6 +486,8 @@ class WorkshopUploader:
         ToolTip(tags_row, "EXPERIMENTAL: Uses Web API to update tags post-upload.\nCommon API keys may lack permissions.\nExamples: Map, Vehicle, Building, Weapon")
         
         mod_frame.columnconfigure(1, weight=1)
+
+    def _setup_actions(self, parent_tab):
 
         # --- ACTIONS ---
         btn_frame = ttk.Frame(parent_tab)
