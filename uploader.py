@@ -234,8 +234,10 @@ class WorkshopUploader:
         self.tags_var = tk.StringVar()
         self.visibility_var = tk.StringVar(value="0") # 0=Public, 1=Friends, 2=Private
         self.item_id_var = tk.StringVar(value="0")
+        self.item_id_var.trace_add("write", self._update_upload_mode_indicator)
         
         self.username_var = tk.StringVar(value=self.config.get("username", ""))
+        self.manage_identity_var = tk.StringVar(value=self.config.get("manage_identity", ""))
         self.password_var = tk.StringVar()
         self.steam_guard_var = tk.StringVar()
         self.use_cached_creds_var = tk.BooleanVar(value=self.config.get("use_cached_creds", False))
@@ -282,6 +284,7 @@ class WorkshopUploader:
             "api_key": self.api_key_var.get(),
             "last_game": self.game_var.get(),
             "username": self.username_var.get(),
+            "manage_identity": self.manage_identity_var.get(),
             "use_cached_creds": self.use_cached_creds_var.get()
         }
         try:
@@ -416,6 +419,9 @@ class WorkshopUploader:
         prof_frame.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
         ttk.Button(prof_frame, text="LOAD PROFILE", command=self.load_profile).pack(side="left")
         ttk.Button(prof_frame, text="SAVE PROFILE", command=self.save_profile).pack(side="left", padx=5)
+        self.upload_mode_label = ttk.Label(prof_frame, text="", foreground=self.colors["highlight"], font=(self.current_font, 10, "bold"))
+        self.upload_mode_label.pack(side="right")
+        self._update_upload_mode_indicator()
         
         # Content Path
         ttk.Label(mod_frame, text="Content Folder:").grid(row=1, column=0, sticky="w")
@@ -461,6 +467,9 @@ class WorkshopUploader:
         
         ttk.Label(meta_row, text="Workshop ID (0=New):").pack(side="left", padx=(20, 5))
         ttk.Entry(meta_row, textvariable=self.item_id_var, width=15).pack(side="left", padx=5)
+        reset_btn = ttk.Button(meta_row, text="CREATE NEW ITEM", command=self.set_create_mode)
+        reset_btn.pack(side="left", padx=(2, 6))
+        ToolTip(reset_btn, "Switches the uploader to create a new Workshop item (Workshop ID = 0).")
         
         link_btn = ttk.Button(meta_row, text="↗", width=3, command=self.open_workshop_page)
         link_btn.pack(side="left", padx=2)
@@ -494,13 +503,25 @@ class WorkshopUploader:
         ctrl_frame.pack(fill="x")
 
         ttk.Button(ctrl_frame, text="Refresh List", command=self.refresh_workshop_items).pack(side="left")
+        set_target_btn = ttk.Button(ctrl_frame, text="Use Selected ID in Upload", command=self.use_selected_item_id_for_upload)
+        set_target_btn.pack(side="left", padx=(10, 0))
+        ToolTip(set_target_btn, "Copies the selected Workshop ID into the Upload tab and switches to update mode.")
         
         update_btn = ttk.Button(ctrl_frame, text="Prepare for Update", command=self.prepare_update)
         update_btn.pack(side="left", padx=10)
         ToolTip(update_btn, "Populates the Upload tab with the selected item's data.\nYou will then need to select the content folder and click Upload.")
         
-        info_label = ttk.Label(ctrl_frame, text="Requires API Key and a valid Username (Vanity URL or SteamID64) in Config.", foreground="#ffff44")
+        info_label = ttk.Label(ctrl_frame, text="Requires API Key.", foreground="#ffff44")
         info_label.pack(side="right")
+
+        identity_frame = ttk.Frame(parent_tab, padding=(10, 0, 10, 10))
+        identity_frame.pack(fill="x")
+
+        ttk.Label(identity_frame, text="Workshop Owner (SteamID64 / Profile URL / Vanity):").pack(side="left")
+        ttk.Entry(identity_frame, textvariable=self.manage_identity_var).pack(side="left", fill="x", expand=True, padx=5)
+        detect_btn = ttk.Button(identity_frame, text="USE CURRENT STEAM LOGIN", command=self.use_local_steam_identity)
+        detect_btn.pack(side="left")
+        ToolTip(detect_btn, "Auto-detects your most recent Steam account and fills the owner as SteamID64.")
 
         # --- TREEVIEW ---
         tree_frame = ttk.Frame(parent_tab)
@@ -523,6 +544,7 @@ class WorkshopUploader:
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
+        self.tree.bind("<<TreeviewSelect>>", self._on_manage_selection)
         self.tree.bind("<Double-1>", lambda e: self.prepare_update())
 
     def _update_title_counter(self, *args):
@@ -540,6 +562,18 @@ class WorkshopUploader:
             self.desc_char_label.config(foreground="red")
         else:
             self.desc_char_label.config(foreground=self.colors["fg"])
+
+    def _update_upload_mode_indicator(self, *args):
+        item_id = self.item_id_var.get().strip()
+        is_update = item_id.isdigit() and item_id != "0"
+        text = f"MODE: UPDATE EXISTING ITEM ({item_id})" if is_update else "MODE: CREATE NEW ITEM"
+        color = "#ffcc66" if is_update else self.colors["highlight"]
+        if hasattr(self, "upload_mode_label"):
+            self.upload_mode_label.config(text=text, foreground=color)
+
+    def set_create_mode(self):
+        self.item_id_var.set("0")
+        self.log("Upload mode set to CREATE NEW ITEM.")
 
     def open_api_key_link(self):
         webbrowser.open("https://steamcommunity.com/dev/apikey")
@@ -1411,11 +1445,16 @@ class WorkshopUploader:
         sc = self.steamcmd_path.get()
         content = self.mod_path.get()
         preview = self.preview_path.get()
-        user = self.username_var.get()
+        user = self.username_var.get().strip()
         pwd = self.password_var.get()
+        use_cached = self.use_cached_creds_var.get()
         
-        if not all([sc, content, preview, user]):
-            messagebox.showerror("Error", "Missing required fields (SteamCMD, Content, Preview, Username).")
+        if not all([sc, content, preview]):
+            messagebox.showerror("Error", "Missing required fields (SteamCMD, Content Folder, Preview Image).")
+            return
+
+        if not use_cached and not user:
+            messagebox.showerror("Error", "Steam Username is required unless 'USE CACHED CREDENTIALS' is enabled.")
             return
             
         if not os.path.exists(sc):
@@ -1511,18 +1550,25 @@ class WorkshopUploader:
     def run_steamcmd(self, exe, user, pwd, vdf):
         self.log("Starting SteamCMD...")
         
-        cmd = [exe, "+login", user]
-        
         use_cached = self.use_cached_creds_var.get()
+        cmd = [exe, "+login"]
+        if user:
+            cmd.append(user)
         
         if not use_cached:
+            if not user:
+                self.log("Execution Error: Username is required when cached credentials are disabled.")
+                return
             if pwd:
                 cmd.append(pwd)
             guard_code = self.steam_guard_var.get()
             if guard_code:
                 cmd.append(guard_code)
         else:
-            self.log("Attempting login using cached credentials...")
+            if user:
+                self.log(f"Attempting login using cached credentials for '{user}'...")
+            else:
+                self.log("Attempting login using cached credentials (no username provided)...")
             
         cmd.extend(["+workshop_build_item", vdf, "+quit"])
         
@@ -1563,33 +1609,167 @@ class WorkshopUploader:
         except Exception as e:
             self.log(f"Execution Error: {e}")
 
-    def refresh_workshop_items(self):
-        if not self.api_key_var.get() or not self.username_var.get():
-            messagebox.showerror("Error", "API Key and Username are required for this feature.")
-            return
-        self.log("Fetching workshop items...")
-        threading.Thread(target=self._refresh_worker, daemon=True).start()
+    def _on_manage_selection(self, _event=None):
+        self.use_selected_item_id_for_upload(switch_to_upload=False, quiet=True)
 
-    def _refresh_worker(self):
+    def use_selected_item_id_for_upload(self, switch_to_upload=True, quiet=False):
+        selected = self.tree.selection()
+        if not selected:
+            if not quiet:
+                messagebox.showinfo("Info", "Select a Workshop item first.")
+            return False
+
+        values = self.tree.item(selected[0]).get("values", [])
+        if len(values) < 2:
+            return False
+
+        title = str(values[0])
+        item_id = str(values[1])
+        self.item_id_var.set(item_id)
+
+        if switch_to_upload:
+            self.notebook.select(self.upload_tab)
+
+        if not quiet:
+            self.log(f"Upload target set to Workshop ID {item_id}: {title}")
+        return True
+
+    def _resolve_vanity_to_steamid(self, vanity, api_key):
+        url = "https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/"
+        r = requests.get(url, params={"key": api_key, "vanityurl": vanity}, timeout=10)
+        r.raise_for_status()
+        data = r.json().get("response", {})
+        if data.get("success") == 1:
+            return data.get("steamid")
+        return None
+
+    def resolve_steam_id(self, identity_input, api_key):
+        text = (identity_input or "").strip()
+        if not text:
+            return None
+
+        # Direct SteamID64 input
+        if text.isdigit() and len(text) == 17:
+            return text
+
+        # https://steamcommunity.com/profiles/<steamid64>
+        profiles_match = re.search(r"steamcommunity\.com/profiles/(\d{17})", text, re.IGNORECASE)
+        if profiles_match:
+            return profiles_match.group(1)
+
+        vanity = text
+        # https://steamcommunity.com/id/<vanity>
+        vanity_match = re.search(r"steamcommunity\.com/id/([^/?#]+)", text, re.IGNORECASE)
+        if vanity_match:
+            vanity = vanity_match.group(1)
+        else:
+            vanity = re.sub(r"^https?://", "", vanity, flags=re.IGNORECASE).strip().strip("/")
+            if vanity.lower().startswith("id/"):
+                vanity = vanity[3:].strip("/")
+
+        if vanity:
+            try:
+                return self._resolve_vanity_to_steamid(vanity, api_key)
+            except Exception:
+                return None
+        return None
+
+    def _extract_loginusers_accounts(self, vdf_path):
+        with open(vdf_path, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+        accounts = []
+        for match in re.finditer(r'"(\d{17})"\s*\{(.*?)\n\s*\}', content, re.DOTALL):
+            block = match.group(2)
+
+            def _get_value(key):
+                key_match = re.search(rf'"{key}"\s+"([^"]*)"', block, re.IGNORECASE)
+                return key_match.group(1).strip() if key_match else ""
+
+            accounts.append({
+                "steamid": match.group(1),
+                "account_name": _get_value("AccountName"),
+                "persona_name": _get_value("PersonaName"),
+                "most_recent": _get_value("MostRecent")
+            })
+        return accounts
+
+    def detect_local_steam_identity(self):
+        candidates = []
+
+        steamcmd_exe = self.steamcmd_path.get().strip()
+        if steamcmd_exe:
+            candidates.append(os.path.join(os.path.dirname(steamcmd_exe), "config", "loginusers.vdf"))
+
+        for env_var in ("PROGRAMFILES(X86)", "PROGRAMFILES"):
+            base = os.environ.get(env_var, "")
+            if base:
+                candidates.append(os.path.join(base, "Steam", "config", "loginusers.vdf"))
+
+        candidates.append(os.path.join(self.base_dir, "steamcmd", "config", "loginusers.vdf"))
+
+        seen = set()
+        for path in candidates:
+            norm = os.path.normpath(path)
+            if norm in seen or not os.path.exists(norm):
+                continue
+            seen.add(norm)
+            try:
+                accounts = self._extract_loginusers_accounts(norm)
+                if not accounts:
+                    continue
+                accounts.sort(key=lambda a: (a.get("most_recent") != "1", a.get("account_name", "")))
+                account = accounts[0]
+                account["source"] = norm
+                return account
+            except Exception:
+                continue
+        return None
+
+    def use_local_steam_identity(self):
+        account = self.detect_local_steam_identity()
+        if not account:
+            messagebox.showerror("Not Found", "Could not auto-detect a local Steam login.\nEnter SteamID64 or profile URL manually.")
+            return
+
+        self.manage_identity_var.set(account["steamid"])
+        if not self.username_var.get().strip() and account.get("account_name"):
+            self.username_var.set(account["account_name"])
+
+        display_name = account.get("persona_name") or account.get("account_name") or account["steamid"]
+        self.log(f"Detected Steam login: {display_name} ({account['steamid']})")
+
+    def refresh_workshop_items(self):
+        if not self.api_key_var.get():
+            messagebox.showerror("Error", "Steam Web API Key is required for this feature.")
+            return
+
+        identity_input = self.manage_identity_var.get().strip()
+        if not identity_input:
+            detected = self.detect_local_steam_identity()
+            if detected:
+                identity_input = detected["steamid"]
+                self.manage_identity_var.set(identity_input)
+                self.log(f"Auto-detected SteamID64 from local login: {identity_input}")
+
+        if not identity_input:
+            messagebox.showerror("Error", "Enter SteamID64/Profile URL/Vanity in Manage tab, or use 'USE CURRENT STEAM LOGIN'.")
+            return
+
+        self.log("Fetching workshop items...")
+        threading.Thread(target=self._refresh_worker, args=(identity_input,), daemon=True).start()
+
+    def _refresh_worker(self, identity_input):
         try:
             # 1. Get SteamID
             api_key = self.api_key_var.get()
-            user_input = self.username_var.get()
-            
-            steam_id = None
-            if user_input.isdigit() and len(user_input) == 17:
-                steam_id = user_input
-            else: # Assume vanity URL
-                vanity_url = f"http://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/?key={api_key}&vanityurl={user_input}"
-                r = requests.get(vanity_url, timeout=10)
-                r.raise_for_status()
-                data = r.json().get("response", {})
-                if data.get("success") == 1:
-                    steam_id = data.get("steamid")
+            steam_id = self.resolve_steam_id(identity_input, api_key)
 
             if not steam_id:
-                self.root.after(0, lambda: self.log("Error: Could not resolve username to SteamID."))
+                self.root.after(0, lambda: self.log("Error: Could not resolve owner. Use SteamID64, profile URL, vanity URL, or 'USE CURRENT STEAM LOGIN'."))
                 return
+
+            self.root.after(0, lambda: self.manage_identity_var.set(steam_id))
 
             # 2. Query items
             appid = self.games[self.game_var.get()]["appid"]
@@ -1653,6 +1833,7 @@ class WorkshopUploader:
         if not selected: return
         
         item_id = self.tree.item(selected[0])['values'][1]
+        self.use_selected_item_id_for_upload(switch_to_upload=False, quiet=True)
         self.log(f"Fetching details for item {item_id}...")
         threading.Thread(target=self._prepare_update_worker, args=(item_id,), daemon=True).start()
 
