@@ -12,6 +12,7 @@ import re
 import requests
 import zipfile
 import io
+import time
 from datetime import datetime
 
 try:
@@ -20,6 +21,13 @@ try:
 except ImportError:
     HAS_PIL = False
 
+try:
+    import keyring
+    HAS_KEYRING = True
+except ImportError:
+    keyring = None
+    HAS_KEYRING = False
+
 # Platform check
 IS_WINDOWS = sys.platform == "win32"
 
@@ -27,6 +35,10 @@ IS_WINDOWS = sys.platform == "win32"
 CONFIG_FILE = "uploader_config.json"
 STEAM_TITLE_LIMIT = 128
 STEAM_DESC_LIMIT = 8000
+REQUEST_RETRY_ATTEMPTS = 3
+REQUEST_BACKOFF_SECONDS = 1.0
+KEYRING_SERVICE = "BattlezoneWorkshopUploader"
+KEYRING_API_KEY_ACCOUNT = "steam_web_api_key"
 
 class ToolTip:
     def __init__(self, widget, text, bg="#1a1a1a", fg="#00ffff"):
@@ -219,7 +231,7 @@ class WorkshopUploader:
         
         # Variables
         self.steamcmd_path = tk.StringVar(value=self.config.get("steamcmd_path", ""))
-        self.api_key_var = tk.StringVar(value=self.config.get("api_key", ""))
+        self.api_key_var = tk.StringVar(value="")
         
         last_game = self.config.get("last_game", "BZ98R")
         if last_game not in self.games: last_game = "BZ98R"
@@ -242,6 +254,10 @@ class WorkshopUploader:
         self.steam_guard_var = tk.StringVar()
         self.use_cached_creds_var = tk.BooleanVar(value=self.config.get("use_cached_creds", False))
         self.use_cached_creds_var.trace_add("write", self._toggle_auth_fields)
+        self.busy_status_var = tk.StringVar(value="STATUS: IDLE")
+        self._active_operations = set()
+        self._busy_lock = threading.Lock()
+        self._warned_no_keyring = False
         
         self.qr_session_id = None
         self.qr_poll_timer = None
@@ -252,7 +268,14 @@ class WorkshopUploader:
         
         self.setup_styles()
         self.setup_ui()
-        
+
+        # Load API key from secure storage; migrate legacy config value if present.
+        self._load_api_key_from_secure_store()
+        legacy_api_key = self.config.get("api_key", "")
+        if not self.api_key_var.get() and legacy_api_key:
+            self.api_key_var.set(legacy_api_key)
+            self._save_api_key_to_secure_store()
+
         # Initial toggle state
         self._toggle_auth_fields()
 
@@ -281,7 +304,6 @@ class WorkshopUploader:
     def save_config(self):
         cfg = {
             "steamcmd_path": self.steamcmd_path.get(),
-            "api_key": self.api_key_var.get(),
             "last_game": self.game_var.get(),
             "username": self.username_var.get(),
             "manage_identity": self.manage_identity_var.get(),
@@ -290,6 +312,66 @@ class WorkshopUploader:
         try:
             with open(CONFIG_FILE, 'w') as f: json.dump(cfg, f, indent=4)
         except Exception: pass
+        self._save_api_key_to_secure_store()
+
+    def _load_api_key_from_secure_store(self):
+        if not HAS_KEYRING:
+            return
+        try:
+            value = keyring.get_password(KEYRING_SERVICE, KEYRING_API_KEY_ACCOUNT)
+            if value:
+                self.api_key_var.set(value)
+        except Exception:
+            pass
+
+    def _save_api_key_to_secure_store(self):
+        value = self.api_key_var.get().strip()
+        if not HAS_KEYRING:
+            if value and not self._warned_no_keyring:
+                self._warned_no_keyring = True
+                self.log("Secure key storage unavailable (install 'keyring'). API key is not persisted.")
+            return
+        try:
+            if value:
+                keyring.set_password(KEYRING_SERVICE, KEYRING_API_KEY_ACCOUNT, value)
+            else:
+                try:
+                    keyring.delete_password(KEYRING_SERVICE, KEYRING_API_KEY_ACCOUNT)
+                except Exception:
+                    pass
+        except Exception as e:
+            self.log(f"Secure key storage error: {e}")
+
+    def _set_busy(self, operation, is_busy):
+        with self._busy_lock:
+            if is_busy:
+                self._active_operations.add(operation)
+            else:
+                self._active_operations.discard(operation)
+            active = sorted(self._active_operations)
+        status_text = "STATUS: IDLE" if not active else f"STATUS: BUSY ({', '.join(active)})"
+        self.root.after(0, lambda: self._apply_busy_state(status_text, bool(active)))
+
+    def _apply_busy_state(self, status_text, is_busy):
+        self.busy_status_var.set(status_text)
+        global_state = "disabled" if is_busy else "normal"
+
+        for name in ("upload_btn", "refresh_btn", "manage_set_target_btn", "manage_update_btn", "manage_detect_btn", "manage_owner_entry"):
+            widget = getattr(self, name, None)
+            if widget is not None:
+                try:
+                    widget.config(state=global_state)
+                except Exception:
+                    pass
+
+        if hasattr(self, "tree"):
+            try:
+                self.tree.configure(selectmode="none" if is_busy else "browse")
+            except Exception:
+                pass
+
+        # Respect cached-credential mode and busy mode simultaneously.
+        self._toggle_auth_fields()
 
     def on_close(self):
         self.save_config()
@@ -494,22 +576,27 @@ class WorkshopUploader:
         self.log_box = tk.Text(parent_tab, height=8, state="disabled", bg="#050505", fg=self.colors["fg"], font=("Consolas", 9))
         self.log_box.pack(fill="x", pady=(0, 10))
         
-        ttk.Button(btn_frame, text="UPLOAD TO STEAM WORKSHOP", command=self.start_upload, style="Success.TButton").pack(side="left", fill="x", expand=True, ipady=5)
-        ttk.Button(btn_frame, text="LOGS", width=10, command=self.show_steam_logs).pack(side="right", fill="y", padx=(5,0))
+        self.upload_btn = ttk.Button(btn_frame, text="UPLOAD TO STEAM WORKSHOP", command=self.start_upload, style="Success.TButton")
+        self.upload_btn.pack(side="left", fill="x", expand=True, ipady=5)
+        self.logs_btn = ttk.Button(btn_frame, text="LOGS", width=10, command=self.show_steam_logs)
+        self.logs_btn.pack(side="right", fill="y", padx=(5,0))
+        self.busy_status_label = ttk.Label(btn_frame, textvariable=self.busy_status_var, foreground="#ffff44")
+        self.busy_status_label.pack(side="right", padx=(0, 10))
 
     def setup_manage_tab(self, parent_tab):
         # --- CONTROLS ---
         ctrl_frame = ttk.Frame(parent_tab, padding=10)
         ctrl_frame.pack(fill="x")
 
-        ttk.Button(ctrl_frame, text="Refresh List", command=self.refresh_workshop_items).pack(side="left")
-        set_target_btn = ttk.Button(ctrl_frame, text="Use Selected ID in Upload", command=self.use_selected_item_id_for_upload)
-        set_target_btn.pack(side="left", padx=(10, 0))
-        ToolTip(set_target_btn, "Copies the selected Workshop ID into the Upload tab and switches to update mode.")
+        self.refresh_btn = ttk.Button(ctrl_frame, text="Refresh List", command=self.refresh_workshop_items)
+        self.refresh_btn.pack(side="left")
+        self.manage_set_target_btn = ttk.Button(ctrl_frame, text="Use Selected ID in Upload", command=self.use_selected_item_id_for_upload)
+        self.manage_set_target_btn.pack(side="left", padx=(10, 0))
+        ToolTip(self.manage_set_target_btn, "Copies the selected Workshop ID into the Upload tab and switches to update mode.")
         
-        update_btn = ttk.Button(ctrl_frame, text="Prepare for Update", command=self.prepare_update)
-        update_btn.pack(side="left", padx=10)
-        ToolTip(update_btn, "Populates the Upload tab with the selected item's data.\nYou will then need to select the content folder and click Upload.")
+        self.manage_update_btn = ttk.Button(ctrl_frame, text="Prepare for Update", command=self.prepare_update)
+        self.manage_update_btn.pack(side="left", padx=10)
+        ToolTip(self.manage_update_btn, "Populates the Upload tab with the selected item's data.\nYou will then need to select the content folder and click Upload.")
         
         info_label = ttk.Label(ctrl_frame, text="Requires API Key.", foreground="#ffff44")
         info_label.pack(side="right")
@@ -518,10 +605,11 @@ class WorkshopUploader:
         identity_frame.pack(fill="x")
 
         ttk.Label(identity_frame, text="Workshop Owner (SteamID64 / Profile URL / Vanity):").pack(side="left")
-        ttk.Entry(identity_frame, textvariable=self.manage_identity_var).pack(side="left", fill="x", expand=True, padx=5)
-        detect_btn = ttk.Button(identity_frame, text="USE CURRENT STEAM LOGIN", command=self.use_local_steam_identity)
-        detect_btn.pack(side="left")
-        ToolTip(detect_btn, "Auto-detects your most recent Steam account and fills the owner as SteamID64.")
+        self.manage_owner_entry = ttk.Entry(identity_frame, textvariable=self.manage_identity_var)
+        self.manage_owner_entry.pack(side="left", fill="x", expand=True, padx=5)
+        self.manage_detect_btn = ttk.Button(identity_frame, text="USE CURRENT STEAM LOGIN", command=self.use_local_steam_identity)
+        self.manage_detect_btn.pack(side="left")
+        ToolTip(self.manage_detect_btn, "Auto-detects your most recent Steam account and fills the owner as SteamID64.")
 
         # --- TREEVIEW ---
         tree_frame = ttk.Frame(parent_tab)
@@ -574,6 +662,203 @@ class WorkshopUploader:
     def set_create_mode(self):
         self.item_id_var.set("0")
         self.log("Upload mode set to CREATE NEW ITEM.")
+
+    def _friendly_api_error(self, error=None, response=None):
+        if response is None and error is not None:
+            response = getattr(error, "response", None)
+
+        status = getattr(response, "status_code", None)
+        if status in (401, 403):
+            return "access denied (check Steam Web API key and account permissions)"
+        if status == 429:
+            return "rate limited by Steam Web API"
+        if status and status >= 500:
+            return f"Steam service unavailable (HTTP {status})"
+        if status:
+            return f"HTTP {status}"
+
+        if error is None:
+            return "unknown API error"
+
+        name = error.__class__.__name__.lower()
+        if "timeout" in name:
+            return "request timed out"
+        if "connection" in name:
+            return "network connection failed"
+        return str(error)
+
+    def _request_with_retry(self, method, url, operation_name="request", timeout=10, attempts=REQUEST_RETRY_ATTEMPTS, backoff=REQUEST_BACKOFF_SECONDS, **kwargs):
+        last_error = None
+
+        for attempt in range(1, attempts + 1):
+            try:
+                response = requests.request(method=method, url=url, timeout=timeout, **kwargs)
+                if response.status_code in (429,) or response.status_code >= 500:
+                    if attempt < attempts:
+                        self.log(f"{operation_name} failed ({self._friendly_api_error(response=response)}). Retrying ({attempt}/{attempts})...")
+                        time.sleep(backoff * (2 ** (attempt - 1)))
+                        continue
+                response.raise_for_status()
+                return response
+            except Exception as e:
+                last_error = e
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                if status and status not in (429,) and status < 500:
+                    raise
+                if attempt >= attempts:
+                    raise
+                self.log(f"{operation_name} failed ({self._friendly_api_error(e)}). Retrying ({attempt}/{attempts})...")
+                time.sleep(backoff * (2 ** (attempt - 1)))
+
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"{operation_name} failed.")
+
+    def _vdf_escape(self, value):
+        text = str(value if value is not None else "")
+        text = text.replace("\\", "\\\\")
+        text = text.replace("\"", "\\\"")
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        text = text.replace("\n", "\\n")
+        return text
+
+    def _build_upload_vdf_content(self, appid, publishedfileid, contentfolder, previewfile, visibility, title, description, changenote):
+        values = {
+            "appid": self._vdf_escape(appid),
+            "publishedfileid": self._vdf_escape(publishedfileid),
+            "contentfolder": self._vdf_escape(os.path.abspath(contentfolder)),
+            "previewfile": self._vdf_escape(os.path.abspath(previewfile)),
+            "visibility": self._vdf_escape(visibility),
+            "title": self._vdf_escape(title),
+            "description": self._vdf_escape(description),
+            "changenote": self._vdf_escape(changenote),
+        }
+        return (
+            "\"workshopitem\"\n"
+            "{\n"
+            f"    \"appid\" \"{values['appid']}\"\n"
+            f"    \"publishedfileid\" \"{values['publishedfileid']}\"\n"
+            f"    \"contentfolder\" \"{values['contentfolder']}\"\n"
+            f"    \"previewfile\" \"{values['previewfile']}\"\n"
+            f"    \"visibility\" \"{values['visibility']}\"\n"
+            f"    \"title\" \"{values['title']}\"\n"
+            f"    \"description\" \"{values['description']}\"\n"
+            f"    \"changenote\" \"{values['changenote']}\"\n"
+            "}\n"
+        )
+
+    def _confirm_upload_plan(self, content, preview, use_cached_creds):
+        item_id = self.item_id_var.get().strip()
+        mode = f"UPDATE ({item_id})" if item_id.isdigit() and item_id != "0" else "CREATE NEW"
+        auth_mode = "Cached credentials" if use_cached_creds else f"Manual login ({self.username_var.get().strip()})"
+        summary_lines = [
+            "Upload Plan",
+            f"- Mode: {mode}",
+            f"- Game: {self.game_var.get()} (AppID {self.games[self.game_var.get()]['appid']})",
+            f"- Workshop ID: {item_id or '0'}",
+            f"- Visibility: {self.visibility_var.get()}",
+            f"- Title: {self.title_var.get()}",
+            f"- Content Folder: {os.path.abspath(content)}",
+            f"- Preview Image: {os.path.abspath(preview)}",
+            f"- Auth: {auth_mode}",
+            f"- Manage Owner Field: {self.manage_identity_var.get().strip() or '(empty)'}",
+            f"- Change Note: {self.note_var.get().strip() or '(empty)'}",
+        ]
+        prompt = "\n".join(summary_lines) + "\n\nProceed with upload?"
+        return messagebox.askyesno("Confirm Upload Plan", prompt)
+
+    def _tokenize_vdf(self, text):
+        tokens = []
+        i = 0
+        length = len(text)
+
+        while i < length:
+            ch = text[i]
+            if ch.isspace():
+                i += 1
+                continue
+
+            if ch == "/" and i + 1 < length and text[i + 1] == "/":
+                i += 2
+                while i < length and text[i] not in ("\r", "\n"):
+                    i += 1
+                continue
+
+            if ch in "{}":
+                tokens.append(ch)
+                i += 1
+                continue
+
+            if ch == "\"":
+                i += 1
+                value = []
+                while i < length:
+                    current = text[i]
+                    if current == "\\" and i + 1 < length:
+                        nxt = text[i + 1]
+                        escapes = {"n": "\n", "r": "\r", "t": "\t", "\"": "\"", "\\": "\\"}
+                        value.append(escapes.get(nxt, nxt))
+                        i += 2
+                        continue
+                    if current == "\"":
+                        i += 1
+                        break
+                    value.append(current)
+                    i += 1
+                tokens.append(("STRING", "".join(value)))
+                continue
+
+            # Support unquoted tokens used in some VDF variants.
+            start = i
+            while i < length and (not text[i].isspace()) and text[i] not in "{}":
+                i += 1
+            tokens.append(("STRING", text[start:i]))
+
+        return tokens
+
+    def _parse_vdf_tokens(self, tokens, start_index=0, expect_closing=False):
+        data = {}
+        i = start_index
+
+        while i < len(tokens):
+            token = tokens[i]
+            if token == "}":
+                if expect_closing:
+                    return data, i + 1
+                raise ValueError("Unexpected closing brace in VDF.")
+
+            if token == "{":
+                raise ValueError("Unexpected opening brace in VDF.")
+
+            key = token[1]
+            i += 1
+            if i >= len(tokens):
+                raise ValueError("Missing VDF value after key.")
+
+            next_token = tokens[i]
+            if next_token == "{":
+                value, i = self._parse_vdf_tokens(tokens, i + 1, expect_closing=True)
+            else:
+                value = next_token[1]
+                i += 1
+            data[key] = value
+
+        if expect_closing:
+            raise ValueError("Missing closing brace in VDF.")
+        return data, i
+
+    def _parse_vdf_text(self, text):
+        tokens = self._tokenize_vdf(text)
+        parsed, _ = self._parse_vdf_tokens(tokens)
+        return parsed
+
+    def _dict_get_ci(self, dct, key, default=""):
+        if not isinstance(dct, dict):
+            return default
+        for k, v in dct.items():
+            if str(k).lower() == key.lower():
+                return v
+        return default
 
     def open_api_key_link(self):
         webbrowser.open("https://steamcommunity.com/dev/apikey")
@@ -653,8 +938,7 @@ class WorkshopUploader:
         def _worker():
             try:
                 url = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip"
-                r = requests.get(url, timeout=30)
-                r.raise_for_status()
+                r = self._request_with_retry("GET", url, operation_name="Download SteamCMD", timeout=30)
                 
                 target_dir = os.path.join(self.base_dir, "steamcmd")
                 os.makedirs(target_dir, exist_ok=True)
@@ -874,7 +1158,8 @@ class WorkshopUploader:
         self.log("QR Login cancelled.")
 
     def _toggle_auth_fields(self, *args):
-        state = "disabled" if self.use_cached_creds_var.get() else "normal"
+        is_busy = bool(self._active_operations)
+        state = "disabled" if self.use_cached_creds_var.get() or is_busy else "normal"
         self.user_entry.config(state=state)
         self.pwd_entry.config(state=state)
         self.guard_entry.config(state=state)
@@ -1512,6 +1797,9 @@ class WorkshopUploader:
             elif not messagebox.askyesno("Confirm Upload", "Continue upload with legacy files included?"):
                 return
 
+        if not self._confirm_upload_plan(content, preview, use_cached):
+            return
+
         self.save_config()
         
         # Create VDF
@@ -1520,20 +1808,17 @@ class WorkshopUploader:
             appid = self.games[self.game_var.get()]["appid"]
             desc = self.desc_text.get("1.0", "end-1c")
             vis = self.visibility_var.get().split()[0]
-            
-            vdf_content = f"""
-"workshopitem"
-{{
-    "appid" "{appid}"
-    "publishedfileid" "{self.item_id_var.get()}"
-    "contentfolder" "{os.path.abspath(content)}"
-    "previewfile" "{os.path.abspath(preview)}"
-    "visibility" "{vis}"
-    "title" "{self.title_var.get()}"
-    "description" "{desc}"
-    "changenote" "{self.note_var.get()}"
-}}
-"""
+
+            vdf_content = self._build_upload_vdf_content(
+                appid=appid,
+                publishedfileid=self.item_id_var.get(),
+                contentfolder=content,
+                previewfile=preview,
+                visibility=vis,
+                title=self.title_var.get(),
+                description=desc,
+                changenote=self.note_var.get(),
+            )
             with open(vdf_path, "w", encoding="utf-8") as f:
                 f.write(vdf_content)
             self.log(f"Generated VDF at {vdf_path}")
@@ -1545,6 +1830,7 @@ class WorkshopUploader:
         vdf_path = os.path.join(self.base_dir, "upload.vdf")
         # Run SteamCMD
         # We use a separate thread to not freeze UI, but we might need a new console for 2FA
+        self._set_busy("Upload", True)
         threading.Thread(target=self.run_steamcmd, args=(sc, user, pwd, vdf_path)).start()
 
     def run_steamcmd(self, exe, user, pwd, vdf):
@@ -1558,6 +1844,7 @@ class WorkshopUploader:
         if not use_cached:
             if not user:
                 self.log("Execution Error: Username is required when cached credentials are disabled.")
+                self._set_busy("Upload", False)
                 return
             if pwd:
                 cmd.append(pwd)
@@ -1608,6 +1895,8 @@ class WorkshopUploader:
                 
         except Exception as e:
             self.log(f"Execution Error: {e}")
+        finally:
+            self._set_busy("Upload", False)
 
     def _on_manage_selection(self, _event=None):
         self.use_selected_item_id_for_upload(switch_to_upload=False, quiet=True)
@@ -1636,8 +1925,13 @@ class WorkshopUploader:
 
     def _resolve_vanity_to_steamid(self, vanity, api_key):
         url = "https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/"
-        r = requests.get(url, params={"key": api_key, "vanityurl": vanity}, timeout=10)
-        r.raise_for_status()
+        r = self._request_with_retry(
+            "GET",
+            url,
+            operation_name="Resolve vanity URL",
+            params={"key": api_key, "vanityurl": vanity},
+            timeout=10
+        )
         data = r.json().get("response", {})
         if data.get("success") == 1:
             return data.get("steamid")
@@ -1678,19 +1972,20 @@ class WorkshopUploader:
         with open(vdf_path, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
 
+        parsed = self._parse_vdf_text(content)
+        users = self._dict_get_ci(parsed, "users", {})
+        if not isinstance(users, dict):
+            return []
+
         accounts = []
-        for match in re.finditer(r'"(\d{17})"\s*\{(.*?)\n\s*\}', content, re.DOTALL):
-            block = match.group(2)
-
-            def _get_value(key):
-                key_match = re.search(rf'"{key}"\s+"([^"]*)"', block, re.IGNORECASE)
-                return key_match.group(1).strip() if key_match else ""
-
+        for steam_id, info in users.items():
+            if not (str(steam_id).isdigit() and len(str(steam_id)) == 17):
+                continue
             accounts.append({
-                "steamid": match.group(1),
-                "account_name": _get_value("AccountName"),
-                "persona_name": _get_value("PersonaName"),
-                "most_recent": _get_value("MostRecent")
+                "steamid": str(steam_id),
+                "account_name": str(self._dict_get_ci(info, "AccountName", "")).strip(),
+                "persona_name": str(self._dict_get_ci(info, "PersonaName", "")).strip(),
+                "most_recent": str(self._dict_get_ci(info, "MostRecent", "")).strip()
             })
         return accounts
 
@@ -1757,6 +2052,7 @@ class WorkshopUploader:
             return
 
         self.log("Fetching workshop items...")
+        self._set_busy("Refresh", True)
         threading.Thread(target=self._refresh_worker, args=(identity_input,), daemon=True).start()
 
     def _refresh_worker(self, identity_input):
@@ -1778,8 +2074,7 @@ class WorkshopUploader:
                 "key": api_key, "creator_appid": appid, "appid": appid,
                 "numperpage": 100, "return_metadata": 1, "steamid": steam_id
             }
-            r = requests.get(query_url, params=params, timeout=10)
-            r.raise_for_status()
+            r = self._request_with_retry("GET", query_url, operation_name="Query Workshop files", params=params, timeout=10)
             items = r.json().get("response", {}).get("publishedfiledetails", [])
             
             self.root.after(0, lambda: self.tree.delete(*self.tree.get_children()))
@@ -1791,7 +2086,9 @@ class WorkshopUploader:
                 self.root.after(0, lambda i=item, v=vis, t=ts: self.tree.insert("", "end", values=(i['title'], i['publishedfileid'], v, t)))
 
         except Exception as e:
-            self.root.after(0, lambda: self.log(f"API Error: {e}"))
+            self.root.after(0, lambda: self.log(f"API Error: {self._friendly_api_error(e)}"))
+        finally:
+            self._set_busy("Refresh", False)
 
     def update_workshop_tags(self):
         """Uses the Steam Web API to set tags on the workshop item."""
@@ -1820,11 +2117,10 @@ class WorkshopUploader:
                 for i, tag in enumerate(tags):
                     data[f"tags[{i}]"] = tag
                 
-                r = requests.post(url, data=data, timeout=10)
-                r.raise_for_status()
+                self._request_with_retry("POST", url, operation_name="Update Workshop tags", data=data, timeout=10)
                 self.log("Workshop tags updated successfully via Web API.")
             except Exception as e:
-                self.log(f"Tag Update Error: {e}")
+                self.log(f"Tag Update Error: {self._friendly_api_error(e)}")
                 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1835,14 +2131,20 @@ class WorkshopUploader:
         item_id = self.tree.item(selected[0])['values'][1]
         self.use_selected_item_id_for_upload(switch_to_upload=False, quiet=True)
         self.log(f"Fetching details for item {item_id}...")
+        self._set_busy("Prepare Update", True)
         threading.Thread(target=self._prepare_update_worker, args=(item_id,), daemon=True).start()
 
     def _prepare_update_worker(self, item_id):
         try:
             api_key = self.api_key_var.get()
             url = "https://api.steampowered.com/IPublishedFileService/GetPublishedFileDetails/v1/"
-            r = requests.post(url, data={"key": api_key, "itemcount": 1, "publishedfileids[0]": item_id}, timeout=10)
-            r.raise_for_status()
+            r = self._request_with_retry(
+                "POST",
+                url,
+                operation_name="Fetch Workshop item details",
+                data={"key": api_key, "itemcount": 1, "publishedfileids[0]": item_id},
+                timeout=10
+            )
             
             details = r.json().get("response", {}).get("publishedfiledetails", [{}])[0]
             if not details:
@@ -1853,7 +2155,7 @@ class WorkshopUploader:
             preview_url = details.get("preview_url")
             preview_local_path = ""
             if preview_url:
-                img_res = requests.get(preview_url, stream=True, timeout=10)
+                img_res = self._request_with_retry("GET", preview_url, operation_name="Download Workshop preview", stream=True, timeout=10)
                 if img_res.ok:
                     preview_local_path = os.path.join(self.temp_dir, f"{item_id}.jpg")
                     with open(preview_local_path, 'wb') as f: f.write(img_res.content)
@@ -1873,7 +2175,9 @@ class WorkshopUploader:
             
             self.root.after(0, do_populate)
         except Exception as e:
-            self.root.after(0, lambda: self.log(f"API Error: {e}"))
+            self.root.after(0, lambda: self.log(f"API Error: {self._friendly_api_error(e)}"))
+        finally:
+            self._set_busy("Prepare Update", False)
 
     def analyze_last_upload_log(self):
         sc_exe = self.steamcmd_path.get()

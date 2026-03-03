@@ -1,6 +1,6 @@
 import sys
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 import os
 import tempfile
 import shutil
@@ -13,11 +13,20 @@ sys.modules['tkinter.messagebox'] = MagicMock()
 sys.modules['PIL'] = MagicMock()
 sys.modules['requests'] = MagicMock()
 sys.modules['ctypes'] = MagicMock()
+sys.modules['keyring'] = MagicMock()
 
 # Add parent directory to path to import uploader
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import uploader
+
+class DummyVar:
+    def __init__(self, value=""):
+        self._value = value
+    def get(self):
+        return self._value
+    def set(self, value):
+        self._value = value
 
 class TestWorkshopUploader(unittest.TestCase):
     def setUp(self):
@@ -30,6 +39,8 @@ class TestWorkshopUploader(unittest.TestCase):
 
         # Redirect log to not pollute stdout during tests
         self.uploader.log = MagicMock()
+        uploader.messagebox.showerror.reset_mock()
+        uploader.messagebox.askyesno.return_value = True
 
     def tearDown(self):
         # Clean up the temporary directory
@@ -164,6 +175,117 @@ class TestWorkshopUploader(unittest.TestCase):
         mat_issue = next(i for i in issues if i[0] == mat_file)
         self.assertEqual(mat_issue[1], "Missing Asset")
         self.assertTrue("missing_tex.tga" in mat_issue[2])
+
+    def test_build_upload_vdf_content_escapes_special_chars(self):
+        content = self.uploader._build_upload_vdf_content(
+            appid="301650",
+            publishedfileid="123",
+            contentfolder=r"C:\mods\test",
+            previewfile=r"C:\mods\preview \"new\".jpg",
+            visibility="0",
+            title='A "Quoted" Title',
+            description="Line1\nLine2",
+            changenote="Backslash \\ test"
+        )
+        self.assertIn('\\"Quoted\\"', content)
+        self.assertIn("Line1\\nLine2", content)
+        self.assertIn("\\\\", content)
+
+    def test_extract_loginusers_accounts_vdf_parser(self):
+        vdf_content = """
+"users"
+{
+    "76561198000000001"
+    {
+        "AccountName" "alpha"
+        "PersonaName" "Alpha User"
+        "MostRecent" "1"
+    }
+    "76561198000000002"
+    {
+        "AccountName" "beta"
+        "PersonaName" "Beta User"
+        "MostRecent" "0"
+    }
+}
+"""
+        vdf_path = os.path.join(self.test_dir, "loginusers.vdf")
+        with open(vdf_path, "w", encoding="utf-8") as f:
+            f.write(vdf_content)
+
+        accounts = self.uploader._extract_loginusers_accounts(vdf_path)
+        self.assertEqual(len(accounts), 2)
+        self.assertEqual(accounts[0]["steamid"], "76561198000000001")
+        self.assertEqual(accounts[0]["account_name"], "alpha")
+        self.assertEqual(accounts[0]["persona_name"], "Alpha User")
+
+    def test_resolve_steam_id_profile_url(self):
+        steam_id = self.uploader.resolve_steam_id("https://steamcommunity.com/profiles/76561198000000001", "dummy")
+        self.assertEqual(steam_id, "76561198000000001")
+
+    def test_resolve_steam_id_vanity(self):
+        with patch.object(self.uploader, "_resolve_vanity_to_steamid", return_value="76561198000000009") as resolve_mock:
+            steam_id = self.uploader.resolve_steam_id("https://steamcommunity.com/id/grizzly", "dummy")
+            self.assertEqual(steam_id, "76561198000000009")
+            resolve_mock.assert_called_once_with("grizzly", "dummy")
+
+    def test_use_selected_item_id_for_upload_sets_update_target(self):
+        self.uploader.item_id_var = DummyVar("0")
+        self.uploader.tree = MagicMock()
+        self.uploader.tree.selection.return_value = ["item1"]
+        self.uploader.tree.item.return_value = {"values": ["My Mod", "999"]}
+        self.uploader.notebook = MagicMock()
+        self.uploader.upload_tab = MagicMock()
+
+        ok = self.uploader.use_selected_item_id_for_upload()
+        self.assertTrue(ok)
+        self.assertEqual(self.uploader.item_id_var.get(), "999")
+        self.uploader.notebook.select.assert_called_once()
+
+    def test_start_upload_cached_credentials_does_not_require_username(self):
+        sc_path = os.path.join(self.test_dir, "steamcmd.exe")
+        with open(sc_path, "w", encoding="utf-8") as f:
+            f.write("exe")
+
+        content_dir = os.path.join(self.test_dir, "content")
+        os.makedirs(content_dir, exist_ok=True)
+        preview_path = os.path.join(self.test_dir, "preview.jpg")
+        with open(preview_path, "w", encoding="utf-8") as f:
+            f.write("img")
+
+        self.uploader.base_dir = self.test_dir
+        self.uploader.desc_text = MagicMock()
+        self.uploader.desc_text.get.return_value = "desc"
+
+        self.uploader.title_var = DummyVar("Test Mod")
+        self.uploader.steamcmd_path = DummyVar(sc_path)
+        self.uploader.mod_path = DummyVar(content_dir)
+        self.uploader.preview_path = DummyVar(preview_path)
+        self.uploader.username_var = DummyVar("")
+        self.uploader.password_var = DummyVar("")
+        self.uploader.use_cached_creds_var = DummyVar(True)
+        self.uploader.visibility_var = DummyVar("0 (Public)")
+        self.uploader.item_id_var = DummyVar("0")
+        self.uploader.note_var = DummyVar("note")
+        self.uploader.game_var = DummyVar("BZ98R")
+        self.uploader.manage_identity_var = DummyVar("")
+
+        self.uploader.scan_mod_safety = MagicMock(return_value=[])
+        self.uploader.scan_asset_references = MagicMock(return_value=[])
+        self.uploader.show_safety_warning = MagicMock(return_value=True)
+        self.uploader.validate_content_structure = MagicMock(return_value=([], []))
+        self.uploader.scan_trn_safety = MagicMock(return_value=([], []))
+        self.uploader.scan_legacy_files = MagicMock(return_value=[])
+        self.uploader.save_config = MagicMock()
+        self.uploader._confirm_upload_plan = MagicMock(return_value=True)
+
+        with patch("uploader.threading.Thread") as thread_mock:
+            thread_instance = MagicMock()
+            thread_mock.return_value = thread_instance
+            self.uploader.start_upload()
+            thread_mock.assert_called_once()
+
+        uploader.messagebox.showerror.assert_not_called()
 
 if __name__ == '__main__':
     unittest.main()

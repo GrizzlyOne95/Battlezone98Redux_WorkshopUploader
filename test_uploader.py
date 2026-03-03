@@ -13,6 +13,7 @@ sys.modules['tkinter.filedialog'] = MagicMock()
 sys.modules['tkinter.messagebox'] = MagicMock()
 sys.modules['PIL'] = MagicMock()
 sys.modules['requests'] = MagicMock()
+sys.modules['keyring'] = MagicMock()
 
 import uploader
 
