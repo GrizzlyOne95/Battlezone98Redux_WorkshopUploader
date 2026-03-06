@@ -1173,6 +1173,11 @@ class WorkshopUploader:
 
         self.log("Analyzing memory footprint...")
         
+        stats, non_dds_textures, all_files = self._scan_files_for_memory(mod_dir)
+        orphans = self._find_orphaned_files(all_files)
+        self._generate_memory_report(stats, non_dds_textures, orphans)
+
+    def _scan_files_for_memory(self, mod_dir):
         stats = {
             "disk_size": 0,
             "est_vram": 0,
@@ -1221,7 +1226,9 @@ class WorkshopUploader:
                         
                 except Exception as e:
                     self.log(f"Skipped {f}: {e}")
+        return stats, non_dds_textures, all_files
 
+    def _find_orphaned_files(self, all_files):
         # --- ORPHAN FINDER ---
         self.log("Scanning for orphaned files...")
         referenced = set()
@@ -1255,7 +1262,9 @@ class WorkshopUploader:
                 except Exception: pass
 
         orphans = [f for f in all_files if f not in referenced and not f.endswith('.ini')]
-        
+        return orphans
+
+    def _generate_memory_report(self, stats, non_dds_textures, orphans):
         disk_mb = stats["disk_size"] / (1024 * 1024)
         vram_mb = stats["est_vram"] / (1024 * 1024)
         
