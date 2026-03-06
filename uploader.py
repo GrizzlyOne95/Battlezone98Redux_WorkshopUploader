@@ -1499,30 +1499,57 @@ class WorkshopUploader:
         weapon_mask_re = re.compile(r'(weaponMask\s*=\s*)["\']?0+["\']?', re.IGNORECASE)
         missing_fields_re = re.compile(r'missing:\s*(.+)')
 
+        # Group issues by file path to minimize I/O operations
+        issues_by_file = {}
         for path, issue_type, detail, line_num in issues:
+            if path not in issues_by_file:
+                issues_by_file[path] = []
+            issues_by_file[path].append((issue_type, detail, line_num))
+
+        for path, file_issues in issues_by_file.items():
             try:
-                # Fix 1: WeaponMask Crash
-                if issue_type == "Crash Risk" and "weaponMask" in detail:
-                    with open(path, 'r', encoding="utf-8", errors="ignore") as f: lines = f.readlines()
-                    if line_num <= len(lines):
-                        # Replace 00000 with 00001
-                        lines[line_num-1] = weapon_mask_re.sub(r'\1"00001"', lines[line_num-1])
-                        with open(path, 'w') as f: f.writelines(lines)
-                        fixed_count += 1
+                # Read file content once
+                with open(path, 'r', encoding="utf-8", errors="ignore") as f:
+                    lines = f.readlines()
                 
-                # Fix 2: Missing Fields
-                elif issue_type == "Missing Fields":
-                    # Detail format: "[Header] missing: key1, key2"
-                    match = missing_fields_re.search(detail)
-                    if match:
-                        keys = [k.strip() for k in match.group(1).split(',')]
-                        with open(path, 'a', encoding="utf-8") as f:
-                            f.write(f"\n// Auto-fixed missing fields\n")
+                original_lines_count = len(lines)
+                modified = False
+                lines_to_append = []
+
+                for issue_type, detail, line_num in file_issues:
+                    # Fix 1: WeaponMask Crash
+                    if issue_type == "Crash Risk" and "weaponMask" in detail:
+                        if line_num <= original_lines_count:
+                            # Replace 00000 with 00001
+                            new_line = weapon_mask_re.sub(r'\1"00001"', lines[line_num-1])
+                            if lines[line_num-1] != new_line:
+                                lines[line_num-1] = new_line
+                                modified = True
+                                fixed_count += 1
+
+                    # Fix 2: Missing Fields
+                    elif issue_type == "Missing Fields":
+                        # Detail format: "[Header] missing: key1, key2"
+                        match = missing_fields_re.search(detail)
+                        if match:
+                            keys = [k.strip() for k in match.group(1).split(',')]
+                            if not lines_to_append:
+                                lines_to_append.append(f"\n// Auto-fixed missing fields\n")
                             for k in keys:
-                                f.write(f"{k} = 0\n")
-                        fixed_count += 1
+                                lines_to_append.append(f"{k} = 0\n")
+                            modified = True
+                            fixed_count += 1
+
+                if modified:
+                    if lines_to_append:
+                        lines.extend(lines_to_append)
+                    # Write file content once
+                    with open(path, 'w', encoding="utf-8") as f:
+                        f.writelines(lines)
+
             except Exception as e:
                 self.log(f"Quick Fix failed for {os.path.basename(path)}: {e}")
+
         return fixed_count
 
     def scan_trn_safety(self, mod_dir):
