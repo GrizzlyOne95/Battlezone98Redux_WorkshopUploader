@@ -151,6 +151,82 @@ class TestWorkshopUploader(unittest.TestCase):
         self.assertEqual(len(errors), 0)
         self.assertEqual(len(warnings), 0)
 
+    def test_validate_content_structure_invalid_dir(self):
+        """Test validate_content_structure with an invalid directory."""
+        invalid_dir = os.path.join(self.test_dir, "nonexistent")
+        errors, warnings = self.uploader.validate_content_structure(invalid_dir)
+        self.assertTrue(any("Could not access content folder" in err for err in errors))
+        self.assertEqual(len(warnings), 0)
+
+    def test_validate_content_structure_bad_ini(self):
+        """Test validate_content_structure with an unparsable INI file."""
+        with open(os.path.join(self.test_dir, "test.ini"), "w") as f:
+            f.write("this is not a valid INI format\nno sections here")
+        errors, warnings = self.uploader.validate_content_structure(self.test_dir)
+        self.assertTrue(any("Failed to parse" in err for err in errors))
+
+    def test_validate_content_structure_missing_workshop_section(self):
+        """Test validate_content_structure with an INI file missing [WORKSHOP] section."""
+        with open(os.path.join(self.test_dir, "test.ini"), "w") as f:
+            f.write("[DESCRIPTION]\nmissionName=\"test\"\n")
+        errors, warnings = self.uploader.validate_content_structure(self.test_dir)
+        self.assertTrue(any("missing [WORKSHOP] section" in err for err in errors))
+
+    def test_validate_content_structure_invalid_maptype(self):
+        """Test validate_content_structure with an invalid mapType."""
+        with open(os.path.join(self.test_dir, "test.ini"), "w") as f:
+            f.write("[WORKSHOP]\nmapType=\"invalid_type\"\n")
+        errors, warnings = self.uploader.validate_content_structure(self.test_dir)
+        self.assertTrue(any("Invalid mapType" in err for err in errors))
+
+    def test_validate_content_structure_missing_essential_files(self):
+        """Test validate_content_structure when essential map files are missing."""
+        with open(os.path.join(self.test_dir, "test.ini"), "w") as f:
+            f.write("[WORKSHOP]\nmapType=\"instant_action\"\n")
+        # Do not create any required map files (e.g. .hg2, .trn, etc.)
+        errors, warnings = self.uploader.validate_content_structure(self.test_dir)
+        self.assertTrue(any("Missing essential file: test.hg2" in err for err in errors))
+        self.assertTrue(any("Missing essential file: test.trn" in err for err in errors))
+
+    def test_validate_content_structure_multiplayer_missing_optional_files_and_fields(self):
+        """Test validate_content_structure when multiplayer optional files and fields are missing."""
+        ini_content = "[WORKSHOP]\nmapType=\"multiplayer\"\n[MULTIPLAYER]\n"
+        with open(os.path.join(self.test_dir, "test.ini"), "w") as f:
+            f.write(ini_content)
+
+        # Create essential files but omit optional ones (.bmp, .des, .vxt)
+        for ext in [".hg2", ".trn", ".mat", ".bzn", ".lgt"]:
+            with open(os.path.join(self.test_dir, f"test{ext}"), "w") as f: f.write("")
+
+        errors, warnings = self.uploader.validate_content_structure(self.test_dir)
+        self.assertEqual(len(errors), 0)
+        self.assertTrue(any("Missing optional file: test.bmp" in warn for warn in warnings))
+        self.assertTrue(any("[MULTIPLAYER] missing 'minplayers'" in warn for warn in warnings))
+        self.assertTrue(any("[MULTIPLAYER] missing 'maxplayers'" in warn for warn in warnings))
+        self.assertTrue(any("[MULTIPLAYER] missing 'gametype'" in warn for warn in warnings))
+
+    def test_validate_content_structure_multiplayer_missing_section(self):
+        """Test validate_content_structure when mapType is multiplayer but [MULTIPLAYER] is missing."""
+        with open(os.path.join(self.test_dir, "test.ini"), "w") as f:
+            f.write("[WORKSHOP]\nmapType=\"multiplayer\"\n")
+
+        # Create essential files
+        for ext in [".hg2", ".trn", ".mat", ".bzn", ".lgt"]:
+            with open(os.path.join(self.test_dir, f"test{ext}"), "w") as f: f.write("")
+
+        errors, warnings = self.uploader.validate_content_structure(self.test_dir)
+        self.assertTrue(any("missing [MULTIPLAYER] section" in err for err in errors))
+
+    def test_validate_content_structure_mod(self):
+        """Test validate_content_structure when mapType is mod."""
+        with open(os.path.join(self.test_dir, "test.ini"), "w") as f:
+            f.write("[WORKSHOP]\nmapType=\"mod\"\n")
+
+        # For mapType 'mod', it shouldn't enforce any specific map files
+        errors, warnings = self.uploader.validate_content_structure(self.test_dir)
+        self.assertEqual(len(errors), 0)
+        self.assertEqual(len(warnings), 0)
+
     def test_scan_asset_references(self):
         """Test scan_asset_references finds missing ODF/material assets."""
         # Create an ODF file with a missing geometry reference
