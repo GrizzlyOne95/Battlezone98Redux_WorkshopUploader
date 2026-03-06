@@ -1494,6 +1494,27 @@ class WorkshopUploader:
         self.root.wait_window(win)
         return getattr(win, 'result', False)
 
+    def _fix_weapon_mask(self, path, line_num, weapon_mask_re):
+        with open(path, 'r', encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        if line_num <= len(lines):
+            lines[line_num-1] = weapon_mask_re.sub(r'\1"00001"', lines[line_num-1])
+            with open(path, 'w', encoding="utf-8") as f:
+                f.writelines(lines)
+            return True
+        return False
+
+    def _fix_missing_fields(self, path, detail, missing_fields_re):
+        match = missing_fields_re.search(detail)
+        if match:
+            keys = [k.strip() for k in match.group(1).split(',')]
+            with open(path, 'a', encoding="utf-8") as f:
+                f.write(f"\n// Auto-fixed missing fields\n")
+                for k in keys:
+                    f.write(f"{k} = 0\n")
+            return True
+        return False
+
     def apply_quick_fixes(self, issues):
         fixed_count = 0
         weapon_mask_re = re.compile(r'(weaponMask\s*=\s*)["\']?0+["\']?', re.IGNORECASE)
@@ -1503,23 +1524,12 @@ class WorkshopUploader:
             try:
                 # Fix 1: WeaponMask Crash
                 if issue_type == "Crash Risk" and "weaponMask" in detail:
-                    with open(path, 'r', encoding="utf-8", errors="ignore") as f: lines = f.readlines()
-                    if line_num <= len(lines):
-                        # Replace 00000 with 00001
-                        lines[line_num-1] = weapon_mask_re.sub(r'\1"00001"', lines[line_num-1])
-                        with open(path, 'w') as f: f.writelines(lines)
+                    if self._fix_weapon_mask(path, line_num, weapon_mask_re):
                         fixed_count += 1
                 
                 # Fix 2: Missing Fields
                 elif issue_type == "Missing Fields":
-                    # Detail format: "[Header] missing: key1, key2"
-                    match = missing_fields_re.search(detail)
-                    if match:
-                        keys = [k.strip() for k in match.group(1).split(',')]
-                        with open(path, 'a', encoding="utf-8") as f:
-                            f.write(f"\n// Auto-fixed missing fields\n")
-                            for k in keys:
-                                f.write(f"{k} = 0\n")
+                    if self._fix_missing_fields(path, detail, missing_fields_re):
                         fixed_count += 1
             except Exception as e:
                 self.log(f"Quick Fix failed for {os.path.basename(path)}: {e}")
