@@ -25,6 +25,7 @@ from app_file_manager import AppFileManager
 from content_fixes import ContentFixer
 from memory_analyzer import MemoryAnalyzer
 from upload_preflight import UploadPreflight
+from steamworks_tags import SteamworksTagUpdater
 
 class DummyVar:
     def __init__(self, value=""):
@@ -255,6 +256,45 @@ class TestWorkshopUploader(unittest.TestCase):
                 guard_code="",
             )
 
+    def test_workshop_backend_prefers_native_steamworks_tag_update(self):
+        updater = MagicMock()
+        updater.try_update_tags.return_value = {"method": "steamworks", "publishedfileid": "123"}
+
+        result = self.uploader.workshop_backend.update_workshop_tags(
+            api_key="",
+            item_id="123",
+            appid="301650",
+            tags=["Map", "Vehicle"],
+            change_note="note",
+            steamworks_updater=updater,
+            base_dir=self.test_dir,
+            create_appid_file=True,
+        )
+
+        self.assertEqual(result["method"], "steamworks")
+        updater.try_update_tags.assert_called_once()
+        self.assertTrue(updater.try_update_tags.call_args.kwargs["create_appid_file"])
+
+    def test_workshop_backend_falls_back_to_web_api_after_native_failure(self):
+        updater = MagicMock()
+        updater.try_update_tags.side_effect = RuntimeError("native failed")
+        self.uploader.workshop_backend.steam_service.request_with_retry = MagicMock()
+
+        result = self.uploader.workshop_backend.update_workshop_tags(
+            api_key="test-key",
+            item_id="123",
+            appid="301650",
+            tags=["Map"],
+            change_note="note",
+            steamworks_updater=updater,
+            base_dir=self.test_dir,
+            create_appid_file=False,
+        )
+
+        self.assertEqual(result["method"], "web_api")
+        self.assertIn("native failed", result["native_error"])
+        self.uploader.workshop_backend.steam_service.request_with_retry.assert_called_once()
+
     def test_content_fixer_builds_upload_plan_prompt(self):
         fixer = ContentFixer()
         prompt = fixer.build_upload_plan_prompt(
@@ -399,6 +439,29 @@ class TestWorkshopUploader(unittest.TestCase):
         self.assertTrue(os.path.exists(vdf_path))
         with open(vdf_path, "r", encoding="utf-8") as f:
             self.assertEqual(f.read(), "vdf:301650:123")
+
+    def test_update_item_id_from_vdf_returns_parsed_id(self):
+        vdf_path = os.path.join(self.test_dir, "upload.vdf")
+        with open(vdf_path, "w", encoding="utf-8") as f:
+            f.write('"workshopitem"\n{\n    "publishedfileid"    "7654321"\n}\n')
+
+        self.uploader.root.after = lambda delay, fn: fn()
+        parsed = self.uploader.update_item_id_from_vdf(vdf_path)
+
+        self.assertEqual(parsed, "7654321")
+
+    def test_steamworks_tag_updater_creates_and_removes_temp_appid_file(self):
+        updater = SteamworksTagUpdater()
+        appid_path = os.path.join(self.test_dir, "steam_appid.txt")
+
+        created = updater._ensure_appid_file(self.test_dir, "301650")
+        self.assertEqual(created, appid_path)
+        self.assertTrue(os.path.exists(appid_path))
+        with open(appid_path, "r", encoding="ascii") as f:
+            self.assertEqual(f.read(), "301650\n")
+
+        created_again = updater._ensure_appid_file(self.test_dir, "301650")
+        self.assertIsNone(created_again)
 
     def test_scan_mod_safety_does_not_require_every_allowed_param(self):
         self.uploader.resource_dir = self.test_dir

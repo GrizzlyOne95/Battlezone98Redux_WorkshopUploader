@@ -15,6 +15,7 @@ from memory_analyzer import MemoryAnalyzer
 from content_fixes import ContentFixer
 from app_file_manager import AppFileManager
 from upload_preflight import UploadPreflight
+from steamworks_tags import SteamworksTagUpdater
 
 try:
     from PIL import Image
@@ -226,6 +227,7 @@ class WorkshopUploader:
         self.steamcmd_process = None
         self.file_manager = AppFileManager(logger=self.log, has_pil=HAS_PIL, image_module=Image if HAS_PIL else None)
         self.upload_preflight = UploadPreflight(logger=self.log)
+        self.steamworks_tag_updater = SteamworksTagUpdater(logger=self.log)
 
         # --- THEME & COLORS (Matched to cmd.py) ---
         self.colors = {
@@ -265,6 +267,7 @@ class WorkshopUploader:
         self.steam_guard_var = tk.StringVar()
         self.use_cached_creds_var = tk.BooleanVar(value=self.config.get("use_cached_creds", False))
         self.use_cached_creds_var.trace_add("write", self._toggle_auth_fields)
+        self.experimental_native_appid_var = tk.BooleanVar(value=self.config.get("experimental_native_appid", False))
         self.busy_status_var = tk.StringVar(value="STATUS: IDLE")
         self._active_operations = set()
         self._busy_lock = threading.Lock()
@@ -324,7 +327,8 @@ class WorkshopUploader:
             "last_game": self.game_var.get(),
             "username": self.username_var.get(),
             "manage_identity": self.manage_identity_var.get(),
-            "use_cached_creds": self.use_cached_creds_var.get()
+            "use_cached_creds": self.use_cached_creds_var.get(),
+            "experimental_native_appid": self.experimental_native_appid_var.get(),
         }
         try:
             self._get_file_manager().save_config(self.config_path, cfg)
@@ -365,6 +369,10 @@ class WorkshopUploader:
     def _get_upload_preflight(self):
         self.upload_preflight.logger = self.log
         return self.upload_preflight
+
+    def _get_steamworks_tag_updater(self):
+        self.steamworks_tag_updater.logger = self.log
+        return self.steamworks_tag_updater
 
     def _load_api_key_from_secure_store(self):
         if not HAS_KEYRING:
@@ -533,6 +541,10 @@ class WorkshopUploader:
         cached_cb = ttk.Checkbutton(auth_opts, text="USE CACHED CREDENTIALS", variable=self.use_cached_creds_var)
         cached_cb.pack(side="left")
         ToolTip(cached_cb, "If checked, SteamCMD will attempt to use existing login session.\nErrors if you are not already signed in.")
+
+        native_appid_cb = ttk.Checkbutton(cfg_frame, text="EXPERIMENTAL: WRITE steam_appid.txt FOR NATIVE TAGS", variable=self.experimental_native_appid_var)
+        native_appid_cb.grid(row=2, column=3, columnspan=3, sticky="w", pady=5, padx=5)
+        ToolTip(native_appid_cb, "Writes a temporary steam_appid.txt next to the uploader while native Steamworks tag submission runs.\nUses the current game AppID and removes the file afterward when this app created it.")
 
         # API Key
         ttk.Label(cfg_frame, text="Steam Web API Key:").grid(row=3, column=0, sticky="w", pady=5)
@@ -1192,20 +1204,23 @@ class WorkshopUploader:
             messagebox.showinfo("Info", "No valid Workshop ID available.")
 
     def update_item_id_from_vdf(self, vdf_path):
-        def _update():
-            try:
-                if os.path.exists(vdf_path):
-                    with open(vdf_path, 'r') as f:
-                        content = f.read()
-                    match = re.search(r'"publishedfileid"\s+"(\d+)"', content)
-                    if match:
-                        new_id = match.group(1)
-                        if new_id != "0":
-                            self.item_id_var.set(new_id)
-                            self.log(f"Detected new Workshop ID: {new_id}")
-            except Exception as e:
-                self.log(f"Failed to parse VDF for ID: {e}")
-        self.root.after(0, _update)
+        try:
+            if not os.path.exists(vdf_path):
+                return None
+            with open(vdf_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            match = re.search(r'"publishedfileid"\s+"(\d+)"', content)
+            if not match:
+                return None
+            new_id = match.group(1)
+            if new_id == "0":
+                return None
+            self.root.after(0, lambda value=new_id: self.item_id_var.set(value))
+            self.log(f"Detected new Workshop ID: {new_id}")
+            return new_id
+        except Exception as e:
+            self.log(f"Failed to parse VDF for ID: {e}")
+            return None
 
     def start_upload(self):
         title = self.title_var.get()
@@ -1347,11 +1362,11 @@ class WorkshopUploader:
             
             if p.returncode == 0:
                 self.log("SteamCMD finished successfully.")
-                self.update_item_id_from_vdf(vdf)
+                updated_item_id = self.update_item_id_from_vdf(vdf)
                 
                 # Apply Tags if present
                 if self.tags_var.get().strip():
-                    self.update_workshop_tags()
+                    self.update_workshop_tags(item_id_override=updated_item_id)
                 
                 self.root.after(0, lambda: messagebox.showinfo("Success", "SteamCMD process finished.\nCheck the console window for upload status."))
             else:
@@ -1493,13 +1508,14 @@ class WorkshopUploader:
         finally:
             self._set_busy("Refresh", False)
 
-    def update_workshop_tags(self):
+    def update_workshop_tags(self, item_id_override=None):
         """Uses the Steam Web API to set tags on the workshop item."""
         api_key = self.api_key_var.get()
-        item_id = self.item_id_var.get()
+        item_id = item_id_override or self.item_id_var.get()
         tags_str = self.tags_var.get()
+        change_note = self.note_var.get()
         
-        if not api_key or not item_id or item_id == "0" or not tags_str:
+        if not item_id or item_id == "0" or not tags_str:
             return
             
         tags = [t.strip() for t in tags_str.split(',') if t.strip()]
@@ -1509,13 +1525,24 @@ class WorkshopUploader:
         
         def _worker():
             try:
-                self._get_workshop_backend().update_workshop_tags(
+                result = self._get_workshop_backend().update_workshop_tags(
                     api_key=api_key,
                     item_id=item_id,
                     appid=self.games[self.game_var.get()]["appid"],
                     tags=tags,
+                    change_note=change_note,
+                    steamworks_updater=self._get_steamworks_tag_updater(),
+                    base_dir=self.base_dir,
+                    create_appid_file=self.experimental_native_appid_var.get(),
                 )
-                self.log("Workshop tags updated successfully via Web API.")
+                if result.get("method") == "steamworks":
+                    self.log("Workshop tags updated successfully via Steamworks.")
+                    if result.get("needs_legal_agreement"):
+                        self.log("Steamworks reported that a Workshop legal agreement may need acceptance.")
+                else:
+                    if result.get("native_error"):
+                        self.log(f"Steamworks tag update failed; falling back to Web API: {result['native_error']}")
+                    self.log("Workshop tags updated successfully via Web API.")
             except Exception as e:
                 self.log(f"Tag Update Error: {self._friendly_api_error(e)}")
                 

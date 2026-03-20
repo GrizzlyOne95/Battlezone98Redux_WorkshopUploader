@@ -92,7 +92,36 @@ class WorkshopBackend:
             return response.content
         return b""
 
-    def update_workshop_tags(self, api_key, item_id, appid, tags):
+    def update_workshop_tags(
+        self,
+        api_key,
+        item_id,
+        appid,
+        tags,
+        change_note="",
+        steamworks_updater=None,
+        base_dir=None,
+        create_appid_file=False,
+    ):
+        native_error = None
+        if steamworks_updater is not None:
+            try:
+                return steamworks_updater.try_update_tags(
+                    appid=appid,
+                    publishedfileid=item_id,
+                    tags=tags,
+                    change_note=change_note,
+                    base_dir=base_dir,
+                    create_appid_file=create_appid_file,
+                )
+            except Exception as e:
+                native_error = e
+
+        if not api_key:
+            if native_error:
+                raise native_error
+            raise ValueError("API key is required for Web API tag updates.")
+
         url = "https://api.steampowered.com/IPublishedFileService/Update/v1/"
         data = {
             "key": api_key,
@@ -109,6 +138,10 @@ class WorkshopBackend:
             data=data,
             timeout=10,
         )
+        return {
+            "method": "web_api",
+            "native_error": str(native_error) if native_error else "",
+        }
 
     def get_log_paths(self, steamcmd_exe, appid):
         base_dir = os.path.dirname(steamcmd_exe)
