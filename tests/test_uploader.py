@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 import os
 import tempfile
 import shutil
+import io
+import zipfile
 
 # Mock out GUI and network libraries that might fail in a headless test environment
 sys.modules['tkinter'] = MagicMock()
@@ -19,6 +21,10 @@ sys.modules['keyring'] = MagicMock()
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import uploader
+from app_file_manager import AppFileManager
+from content_fixes import ContentFixer
+from memory_analyzer import MemoryAnalyzer
+from upload_preflight import UploadPreflight
 
 class DummyVar:
     def __init__(self, value=""):
@@ -176,6 +182,39 @@ class TestWorkshopUploader(unittest.TestCase):
         self.assertEqual(mat_issue[1], "Missing Asset")
         self.assertTrue("missing_tex.tga" in mat_issue[2])
 
+    def test_memory_analyzer_detects_orphans_and_textures(self):
+        analyzer = MemoryAnalyzer()
+
+        with open(os.path.join(self.test_dir, "map.ini"), "w", encoding="utf-8") as f:
+            f.write("[WORKSHOP]\nmapType=\"mod\"\n")
+        with open(os.path.join(self.test_dir, "script.odf"), "w", encoding="utf-8") as f:
+            f.write('geometryName = "used_model.xsi"\n')
+        with open(os.path.join(self.test_dir, "used_model.xsi"), "w", encoding="utf-8") as f:
+            f.write("mesh")
+        with open(os.path.join(self.test_dir, "orphan.png"), "wb") as f:
+            f.write(b"pngdata")
+
+        analysis = analyzer.analyze(self.test_dir)
+
+        self.assertEqual(analysis["counts"]["Texture"], 1)
+        self.assertIn("orphan.png", analysis["non_dds_textures"])
+        self.assertIn("orphan.png", analysis["orphans"])
+        self.assertNotIn("used_model.xsi", analysis["orphans"])
+
+    def test_memory_analyzer_report_mentions_orphans(self):
+        analyzer = MemoryAnalyzer()
+        report = analyzer.build_report({
+            "disk_mb": 1.25,
+            "vram_mb": 12.5,
+            "counts": {"Texture": 1, "Model": 2, "Audio": 0, "Script": 3, "Other": 4},
+            "non_dds_textures": ["orphan.png"],
+            "orphans": ["orphan.png", "unused.wav"],
+        })
+        self.assertIn("MEMORY ANALYSIS REPORT", report)
+        self.assertIn("non-DDS textures", report)
+        self.assertIn("ORPHANS", report)
+        self.assertIn("orphan.png", report)
+
     def test_build_upload_vdf_content_escapes_special_chars(self):
         content = self.uploader._build_upload_vdf_content(
             appid="301650",
@@ -190,6 +229,217 @@ class TestWorkshopUploader(unittest.TestCase):
         self.assertIn('\\"Quoted\\"', content)
         self.assertIn("Line1\\nLine2", content)
         self.assertIn("\\\\", content)
+
+    def test_workshop_backend_builds_manual_steamcmd_command(self):
+        cmd = self.uploader.workshop_backend.build_steamcmd_command(
+            exe="steamcmd.exe",
+            user="tester",
+            pwd="secret",
+            vdf="upload.vdf",
+            use_cached=False,
+            guard_code="abc123",
+        )
+        self.assertEqual(cmd, [
+            "steamcmd.exe", "+login", "tester", "secret", "abc123",
+            "+workshop_build_item", "upload.vdf", "+quit"
+        ])
+
+    def test_workshop_backend_requires_username_without_cached_creds(self):
+        with self.assertRaises(ValueError):
+            self.uploader.workshop_backend.build_steamcmd_command(
+                exe="steamcmd.exe",
+                user="",
+                pwd="secret",
+                vdf="upload.vdf",
+                use_cached=False,
+                guard_code="",
+            )
+
+    def test_content_fixer_builds_upload_plan_prompt(self):
+        fixer = ContentFixer()
+        prompt = fixer.build_upload_plan_prompt(
+            item_id="123",
+            game_name="BZ98R",
+            appid="301650",
+            visibility="0 (Public)",
+            title="Test Mod",
+            content=r"C:\mods\content",
+            preview=r"C:\mods\preview.jpg",
+            auth_mode="Cached credentials",
+            manage_owner="76561198000000001",
+            change_note="Initial Release",
+        )
+        self.assertIn("Upload Plan", prompt)
+        self.assertIn("UPDATE (123)", prompt)
+        self.assertIn("Cached credentials", prompt)
+        self.assertIn("Proceed with upload?", prompt)
+
+    def test_save_config_writes_to_config_path_not_cwd(self):
+        self.uploader.config_path = os.path.join(self.test_dir, "uploader_config.json")
+        other_cwd = os.path.join(self.test_dir, "othercwd")
+        os.makedirs(other_cwd, exist_ok=True)
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(other_cwd)
+            self.uploader.steamcmd_path.set("C:\\steamcmd\\steamcmd.exe")
+            self.uploader.game_var.set("BZ98R")
+            self.uploader.username_var.set("tester")
+            self.uploader.manage_identity_var.set("76561198000000001")
+            self.uploader.use_cached_creds_var.set(True)
+            self.uploader.save_config()
+        finally:
+            os.chdir(original_cwd)
+
+        self.assertTrue(os.path.exists(self.uploader.config_path))
+        self.assertFalse(os.path.exists(os.path.join(other_cwd, "uploader_config.json")))
+
+    def test_load_config_uses_legacy_cwd_fallback(self):
+        missing_config_path = os.path.join(self.test_dir, "missing", "uploader_config.json")
+        legacy_cwd = os.path.join(self.test_dir, "legacycwd")
+        os.makedirs(legacy_cwd, exist_ok=True)
+        legacy_config = os.path.join(legacy_cwd, "uploader_config.json")
+        with open(legacy_config, "w", encoding="utf-8") as f:
+            f.write('{"steamcmd_path": "C:\\\\legacy\\\\steamcmd.exe"}')
+
+        self.uploader.config_path = missing_config_path
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(legacy_cwd)
+            config = self.uploader.load_config()
+        finally:
+            os.chdir(original_cwd)
+
+        self.assertEqual(config["steamcmd_path"], "C:\\legacy\\steamcmd.exe")
+
+    def test_app_file_manager_profile_round_trip(self):
+        manager = AppFileManager()
+        profile_path = os.path.join(self.test_dir, "profiles", "sample.json")
+        payload = {
+            "mod_path": "C:\\mods\\sample",
+            "title": "Sample",
+            "item_id": "123",
+        }
+
+        manager.save_profile(profile_path, payload)
+        loaded = manager.load_profile(profile_path)
+
+        self.assertEqual(loaded, payload)
+
+    def test_app_file_manager_downloads_and_extracts_steamcmd(self):
+        manager = AppFileManager()
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("steamcmd.exe", "stub")
+
+        response = MagicMock()
+        response.content = buffer.getvalue()
+
+        request_with_retry = MagicMock(return_value=response)
+        exe_path = manager.download_steamcmd(self.test_dir, request_with_retry)
+
+        self.assertTrue(os.path.exists(exe_path))
+        request_with_retry.assert_called_once()
+
+    def test_upload_preflight_validate_inputs_rejects_missing_username_without_cached_creds(self):
+        preflight = UploadPreflight()
+        steamcmd_path = os.path.join(self.test_dir, "steamcmd.exe")
+        with open(steamcmd_path, "w", encoding="utf-8") as f:
+            f.write("exe")
+
+        result = preflight.validate_inputs(
+            title="Test Mod",
+            description="desc",
+            steamcmd_path=steamcmd_path,
+            content_path="C:\\mods\\content",
+            preview_path="C:\\mods\\preview.jpg",
+            username="",
+            use_cached_creds=False,
+            title_limit=128,
+            description_limit=8000,
+        )
+
+        self.assertEqual(result, ("Error", "Steam Username is required unless 'USE CACHED CREDENTIALS' is enabled."))
+
+    def test_upload_preflight_builds_relative_safety_rows(self):
+        preflight = UploadPreflight()
+        mod_dir = os.path.join(self.test_dir, "mod")
+        os.makedirs(mod_dir, exist_ok=True)
+        odf_path = os.path.join(mod_dir, "test.odf")
+        with open(odf_path, "w", encoding="utf-8") as f:
+            f.write("[CraftClass]\n")
+
+        rows = preflight.build_safety_rows(
+            [(odf_path, "Missing Fields", "Missing: weaponName", 2)],
+            mod_dir,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["display_path"], "test.odf")
+        self.assertEqual(rows[0]["full_path"], odf_path)
+
+    def test_upload_preflight_writes_upload_vdf(self):
+        preflight = UploadPreflight()
+
+        def build_upload_vdf_content(**kwargs):
+            return f"vdf:{kwargs['appid']}:{kwargs['publishedfileid']}"
+
+        vdf_path = preflight.write_upload_vdf(
+            base_dir=self.test_dir,
+            appid="301650",
+            publishedfileid="123",
+            contentfolder=r"C:\mods\content",
+            previewfile=r"C:\mods\preview.jpg",
+            visibility="0",
+            title="Test Mod",
+            description="desc",
+            changenote="note",
+            build_upload_vdf_content=build_upload_vdf_content,
+        )
+
+        self.assertTrue(os.path.exists(vdf_path))
+        with open(vdf_path, "r", encoding="utf-8") as f:
+            self.assertEqual(f.read(), "vdf:301650:123")
+
+    def test_scan_mod_safety_does_not_require_every_allowed_param(self):
+        self.uploader.resource_dir = self.test_dir
+
+        with open(os.path.join(self.test_dir, "odfHeaderList.txt"), "w", encoding="utf-8") as f:
+            f.write("CraftClass\n")
+        with open(os.path.join(self.test_dir, "bzrODFparams.txt"), "w", encoding="utf-8") as f:
+            f.write("[CraftClass]\nweaponName\nreloadDelay?\n")
+        with open(os.path.join(self.test_dir, "test.odf"), "w", encoding="utf-8") as f:
+            f.write("[CraftClass]\nweaponName = \"gun\"\n")
+
+        issues = self.uploader.scan_mod_safety(self.test_dir)
+        self.assertFalse(any(issue[1] == "Missing Fields" for issue in issues))
+
+    def test_scan_mod_safety_honors_explicit_required_param_marker(self):
+        self.uploader.resource_dir = self.test_dir
+
+        with open(os.path.join(self.test_dir, "odfHeaderList.txt"), "w", encoding="utf-8") as f:
+            f.write("CraftClass\n")
+        with open(os.path.join(self.test_dir, "bzrODFparams.txt"), "w", encoding="utf-8") as f:
+            f.write("[CraftClass]\n!weaponName\nreloadDelay?\n")
+        with open(os.path.join(self.test_dir, "test.odf"), "w", encoding="utf-8") as f:
+            f.write("[CraftClass]\nreloadDelay = 1\n")
+
+        issues = self.uploader.scan_mod_safety(self.test_dir)
+        missing = [issue for issue in issues if issue[1] == "Missing Fields"]
+        self.assertEqual(len(missing), 1)
+        self.assertIn("weaponname", missing[0][2].lower())
+
+    def test_fingerprint_inventory_changes_when_file_changes(self):
+        target = os.path.join(self.test_dir, "test.txt")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("alpha")
+
+        first = self.uploader._fingerprint_inventory(self.uploader._build_mod_inventory(self.test_dir))
+
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("beta content")
+
+        second = self.uploader._fingerprint_inventory(self.uploader._build_mod_inventory(self.test_dir))
+        self.assertNotEqual(first, second)
 
     def test_extract_loginusers_accounts_vdf_parser(self):
         vdf_content = """
@@ -224,10 +474,10 @@ class TestWorkshopUploader(unittest.TestCase):
         self.assertEqual(steam_id, "76561198000000001")
 
     def test_resolve_steam_id_vanity(self):
-        with patch.object(self.uploader, "_resolve_vanity_to_steamid", return_value="76561198000000009") as resolve_mock:
+        with patch.object(self.uploader.steam_service, "resolve_vanity_to_steamid", return_value="76561198000000009") as resolve_mock:
             steam_id = self.uploader.resolve_steam_id("https://steamcommunity.com/id/grizzly", "dummy")
             self.assertEqual(steam_id, "76561198000000009")
-            resolve_mock.assert_called_once_with("grizzly", "dummy")
+            resolve_mock.assert_called_once()
 
     def test_use_selected_item_id_for_upload_sets_update_target(self):
         self.uploader.item_id_var = DummyVar("0")
@@ -270,12 +520,17 @@ class TestWorkshopUploader(unittest.TestCase):
         self.uploader.game_var = DummyVar("BZ98R")
         self.uploader.manage_identity_var = DummyVar("")
 
-        self.uploader.scan_mod_safety = MagicMock(return_value=[])
-        self.uploader.scan_asset_references = MagicMock(return_value=[])
+        self.uploader._build_mod_inventory = MagicMock(return_value=[])
+        self.uploader._collect_mod_findings = MagicMock(return_value={
+            "inventory": [],
+            "issues": [],
+            "validation_errors": [],
+            "validation_warnings": [],
+            "trn_line_endings": [],
+            "trn_duplicate_headers": [],
+            "legacy_files": [],
+        })
         self.uploader.show_safety_warning = MagicMock(return_value=True)
-        self.uploader.validate_content_structure = MagicMock(return_value=([], []))
-        self.uploader.scan_trn_safety = MagicMock(return_value=([], []))
-        self.uploader.scan_legacy_files = MagicMock(return_value=[])
         self.uploader.save_config = MagicMock()
         self.uploader._confirm_upload_plan = MagicMock(return_value=True)
 

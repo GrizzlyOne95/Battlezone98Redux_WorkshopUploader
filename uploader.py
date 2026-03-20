@@ -1,7 +1,5 @@
 import os
 import sys
-import json
-import configparser
 import subprocess
 import threading
 import webbrowser
@@ -10,16 +8,26 @@ from tkinter import ttk, filedialog, messagebox
 import ctypes
 import re
 import requests
-import zipfile
-import io
-import time
-from datetime import datetime
+from mod_scanner import ModScanner
+from steam_service import SteamService
+from workshop_backend import WorkshopBackend
+from memory_analyzer import MemoryAnalyzer
+from content_fixes import ContentFixer
+from app_file_manager import AppFileManager
+from upload_preflight import UploadPreflight
 
 try:
     from PIL import Image
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
+
+try:
+    import qrcode
+    HAS_QRCODE = True
+except ImportError:
+    qrcode = None
+    HAS_QRCODE = False
 
 try:
     import keyring
@@ -32,7 +40,7 @@ except ImportError:
 IS_WINDOWS = sys.platform == "win32"
 
 # --- CONFIGURATION ---
-CONFIG_FILE = "uploader_config.json"
+CONFIG_FILE_NAME = "uploader_config.json"
 STEAM_TITLE_LIMIT = 128
 STEAM_DESC_LIMIT = 8000
 REQUEST_RETRY_ATTEMPTS = 3
@@ -207,6 +215,7 @@ class WorkshopUploader:
         else:
             self.base_dir = os.path.dirname(os.path.abspath(__file__))
             self.resource_dir = self.base_dir
+        self.config_path = os.path.join(self.base_dir, CONFIG_FILE_NAME)
             
         self.profiles_dir = os.path.join(self.base_dir, "profiles")
         os.makedirs(self.profiles_dir, exist_ok=True)
@@ -215,6 +224,8 @@ class WorkshopUploader:
         os.makedirs(self.temp_dir, exist_ok=True)
 
         self.steamcmd_process = None
+        self.file_manager = AppFileManager(logger=self.log, has_pil=HAS_PIL, image_module=Image if HAS_PIL else None)
+        self.upload_preflight = UploadPreflight(logger=self.log)
 
         # --- THEME & COLORS (Matched to cmd.py) ---
         self.colors = {
@@ -264,7 +275,13 @@ class WorkshopUploader:
         
         self.watch_mode_var = tk.BooleanVar(value=False)
         self.watch_thread = None
-        self.last_scan_time = 0
+        self.last_watch_signature = None
+        self.last_watch_summary = None
+        self.mod_scanner = ModScanner(self.resource_dir, logger=self.log)
+        self.steam_service = SteamService(logger=self.log)
+        self.workshop_backend = WorkshopBackend(self.steam_service, logger=self.log)
+        self.memory_analyzer = MemoryAnalyzer(logger=self.log, has_pil=HAS_PIL, image_module=Image if HAS_PIL else None)
+        self.content_fixer = ContentFixer(logger=self.log)
         
         self.setup_styles()
         self.setup_ui()
@@ -295,11 +312,11 @@ class WorkshopUploader:
                 except Exception: pass
 
     def load_config(self):
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, 'r') as f: return json.load(f)
-            except Exception: pass
-        return {}
+        candidate_paths = [self.config_path]
+        legacy_path = os.path.abspath(CONFIG_FILE_NAME)
+        if legacy_path not in candidate_paths:
+            candidate_paths.append(legacy_path)
+        return self._get_file_manager().load_config(self.config_path, legacy_paths=candidate_paths[1:])
 
     def save_config(self):
         cfg = {
@@ -310,9 +327,44 @@ class WorkshopUploader:
             "use_cached_creds": self.use_cached_creds_var.get()
         }
         try:
-            with open(CONFIG_FILE, 'w') as f: json.dump(cfg, f, indent=4)
-        except Exception: pass
+            self._get_file_manager().save_config(self.config_path, cfg)
+        except Exception:
+            pass
         self._save_api_key_to_secure_store()
+
+    def _get_mod_scanner(self):
+        self.mod_scanner.resource_dir = self.resource_dir
+        self.mod_scanner.logger = self.log
+        return self.mod_scanner
+
+    def _get_steam_service(self):
+        self.steam_service.logger = self.log
+        return self.steam_service
+
+    def _get_workshop_backend(self):
+        self.workshop_backend.logger = self.log
+        self.workshop_backend.steam_service = self._get_steam_service()
+        return self.workshop_backend
+
+    def _get_memory_analyzer(self):
+        self.memory_analyzer.logger = self.log
+        self.memory_analyzer.has_pil = HAS_PIL
+        self.memory_analyzer.image_module = Image if HAS_PIL else None
+        return self.memory_analyzer
+
+    def _get_content_fixer(self):
+        self.content_fixer.logger = self.log
+        return self.content_fixer
+
+    def _get_file_manager(self):
+        self.file_manager.logger = self.log
+        self.file_manager.has_pil = HAS_PIL
+        self.file_manager.image_module = Image if HAS_PIL else None
+        return self.file_manager
+
+    def _get_upload_preflight(self):
+        self.upload_preflight.logger = self.log
+        return self.upload_preflight
 
     def _load_api_key_from_secure_store(self):
         if not HAS_KEYRING:
@@ -664,215 +716,71 @@ class WorkshopUploader:
         self.log("Upload mode set to CREATE NEW ITEM.")
 
     def _friendly_api_error(self, error=None, response=None):
-        if response is None and error is not None:
-            response = getattr(error, "response", None)
-
-        status = getattr(response, "status_code", None)
-        if status in (401, 403):
-            return "access denied (check Steam Web API key and account permissions)"
-        if status == 429:
-            return "rate limited by Steam Web API"
-        if status and status >= 500:
-            return f"Steam service unavailable (HTTP {status})"
-        if status:
-            return f"HTTP {status}"
-
-        if error is None:
-            return "unknown API error"
-
-        name = error.__class__.__name__.lower()
-        if "timeout" in name:
-            return "request timed out"
-        if "connection" in name:
-            return "network connection failed"
-        return str(error)
+        return self._get_steam_service().friendly_api_error(error=error, response=response)
 
     def _request_with_retry(self, method, url, operation_name="request", timeout=10, attempts=REQUEST_RETRY_ATTEMPTS, backoff=REQUEST_BACKOFF_SECONDS, **kwargs):
-        last_error = None
-
-        for attempt in range(1, attempts + 1):
-            try:
-                response = requests.request(method=method, url=url, timeout=timeout, **kwargs)
-                if response.status_code in (429,) or response.status_code >= 500:
-                    if attempt < attempts:
-                        self.log(f"{operation_name} failed ({self._friendly_api_error(response=response)}). Retrying ({attempt}/{attempts})...")
-                        time.sleep(backoff * (2 ** (attempt - 1)))
-                        continue
-                response.raise_for_status()
-                return response
-            except Exception as e:
-                last_error = e
-                status = getattr(getattr(e, "response", None), "status_code", None)
-                if status and status not in (429,) and status < 500:
-                    raise
-                if attempt >= attempts:
-                    raise
-                self.log(f"{operation_name} failed ({self._friendly_api_error(e)}). Retrying ({attempt}/{attempts})...")
-                time.sleep(backoff * (2 ** (attempt - 1)))
-
-        if last_error:
-            raise last_error
-        raise RuntimeError(f"{operation_name} failed.")
+        return self._get_steam_service().request_with_retry(
+            method,
+            url,
+            operation_name=operation_name,
+            timeout=timeout,
+            attempts=attempts,
+            backoff=backoff,
+            **kwargs,
+        )
 
     def _vdf_escape(self, value):
-        text = str(value if value is not None else "")
-        text = text.replace("\\", "\\\\")
-        text = text.replace("\"", "\\\"")
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-        text = text.replace("\n", "\\n")
-        return text
+        return self._get_steam_service().vdf_escape(value)
 
     def _build_upload_vdf_content(self, appid, publishedfileid, contentfolder, previewfile, visibility, title, description, changenote):
-        values = {
-            "appid": self._vdf_escape(appid),
-            "publishedfileid": self._vdf_escape(publishedfileid),
-            "contentfolder": self._vdf_escape(os.path.abspath(contentfolder)),
-            "previewfile": self._vdf_escape(os.path.abspath(previewfile)),
-            "visibility": self._vdf_escape(visibility),
-            "title": self._vdf_escape(title),
-            "description": self._vdf_escape(description),
-            "changenote": self._vdf_escape(changenote),
-        }
-        return (
-            "\"workshopitem\"\n"
-            "{\n"
-            f"    \"appid\" \"{values['appid']}\"\n"
-            f"    \"publishedfileid\" \"{values['publishedfileid']}\"\n"
-            f"    \"contentfolder\" \"{values['contentfolder']}\"\n"
-            f"    \"previewfile\" \"{values['previewfile']}\"\n"
-            f"    \"visibility\" \"{values['visibility']}\"\n"
-            f"    \"title\" \"{values['title']}\"\n"
-            f"    \"description\" \"{values['description']}\"\n"
-            f"    \"changenote\" \"{values['changenote']}\"\n"
-            "}\n"
+        return self._get_steam_service().build_upload_vdf_content(
+            appid=appid,
+            publishedfileid=publishedfileid,
+            contentfolder=contentfolder,
+            previewfile=previewfile,
+            visibility=visibility,
+            title=title,
+            description=description,
+            changenote=changenote,
         )
 
     def _confirm_upload_plan(self, content, preview, use_cached_creds):
         item_id = self.item_id_var.get().strip()
-        mode = f"UPDATE ({item_id})" if item_id.isdigit() and item_id != "0" else "CREATE NEW"
         auth_mode = "Cached credentials" if use_cached_creds else f"Manual login ({self.username_var.get().strip()})"
-        summary_lines = [
-            "Upload Plan",
-            f"- Mode: {mode}",
-            f"- Game: {self.game_var.get()} (AppID {self.games[self.game_var.get()]['appid']})",
-            f"- Workshop ID: {item_id or '0'}",
-            f"- Visibility: {self.visibility_var.get()}",
-            f"- Title: {self.title_var.get()}",
-            f"- Content Folder: {os.path.abspath(content)}",
-            f"- Preview Image: {os.path.abspath(preview)}",
-            f"- Auth: {auth_mode}",
-            f"- Manage Owner Field: {self.manage_identity_var.get().strip() or '(empty)'}",
-            f"- Change Note: {self.note_var.get().strip() or '(empty)'}",
-        ]
-        prompt = "\n".join(summary_lines) + "\n\nProceed with upload?"
+        prompt = self._get_content_fixer().build_upload_plan_prompt(
+            item_id=item_id,
+            game_name=self.game_var.get(),
+            appid=self.games[self.game_var.get()]["appid"],
+            visibility=self.visibility_var.get(),
+            title=self.title_var.get(),
+            content=content,
+            preview=preview,
+            auth_mode=auth_mode,
+            manage_owner=self.manage_identity_var.get().strip(),
+            change_note=self.note_var.get().strip(),
+        )
         return messagebox.askyesno("Confirm Upload Plan", prompt)
 
     def _tokenize_vdf(self, text):
-        tokens = []
-        i = 0
-        length = len(text)
-
-        while i < length:
-            ch = text[i]
-            if ch.isspace():
-                i += 1
-                continue
-
-            if ch == "/" and i + 1 < length and text[i + 1] == "/":
-                i += 2
-                while i < length and text[i] not in ("\r", "\n"):
-                    i += 1
-                continue
-
-            if ch in "{}":
-                tokens.append(ch)
-                i += 1
-                continue
-
-            if ch == "\"":
-                i += 1
-                value = []
-                while i < length:
-                    current = text[i]
-                    if current == "\\" and i + 1 < length:
-                        nxt = text[i + 1]
-                        escapes = {"n": "\n", "r": "\r", "t": "\t", "\"": "\"", "\\": "\\"}
-                        value.append(escapes.get(nxt, nxt))
-                        i += 2
-                        continue
-                    if current == "\"":
-                        i += 1
-                        break
-                    value.append(current)
-                    i += 1
-                tokens.append(("STRING", "".join(value)))
-                continue
-
-            # Support unquoted tokens used in some VDF variants.
-            start = i
-            while i < length and (not text[i].isspace()) and text[i] not in "{}":
-                i += 1
-            tokens.append(("STRING", text[start:i]))
-
-        return tokens
+        return self._get_steam_service().tokenize_vdf(text)
 
     def _parse_vdf_tokens(self, tokens, start_index=0, expect_closing=False):
-        data = {}
-        i = start_index
-
-        while i < len(tokens):
-            token = tokens[i]
-            if token == "}":
-                if expect_closing:
-                    return data, i + 1
-                raise ValueError("Unexpected closing brace in VDF.")
-
-            if token == "{":
-                raise ValueError("Unexpected opening brace in VDF.")
-
-            key = token[1]
-            i += 1
-            if i >= len(tokens):
-                raise ValueError("Missing VDF value after key.")
-
-            next_token = tokens[i]
-            if next_token == "{":
-                value, i = self._parse_vdf_tokens(tokens, i + 1, expect_closing=True)
-            else:
-                value = next_token[1]
-                i += 1
-            data[key] = value
-
-        if expect_closing:
-            raise ValueError("Missing closing brace in VDF.")
-        return data, i
+        return self._get_steam_service().parse_vdf_tokens(tokens, start_index=start_index, expect_closing=expect_closing)
 
     def _parse_vdf_text(self, text):
-        tokens = self._tokenize_vdf(text)
-        parsed, _ = self._parse_vdf_tokens(tokens)
-        return parsed
+        return self._get_steam_service().parse_vdf_text(text)
 
     def _dict_get_ci(self, dct, key, default=""):
-        if not isinstance(dct, dict):
-            return default
-        for k, v in dct.items():
-            if str(k).lower() == key.lower():
-                return v
-        return default
+        return self._get_steam_service().dict_get_ci(dct, key, default=default)
 
     def open_api_key_link(self):
         webbrowser.open("https://steamcommunity.com/dev/apikey")
 
     def resize_preview_image(self, image_path):
         try:
-            img = Image.open(image_path)
-            if img.mode != 'RGB': img = img.convert('RGB')
-            img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
-            out_path = os.path.join(self.temp_dir, os.path.basename(image_path) + "_resized.jpg")
-            for quality in range(90, 20, -5):
-                img.save(out_path, "jpeg", quality=quality, optimize=True)
-                if os.path.getsize(out_path) < 1024 * 1024: return out_path
-        except Exception as e: self.log(f"Error resizing image: {e}")
+            return self._get_file_manager().resize_preview_image(image_path, self.temp_dir)
+        except Exception as e:
+            self.log(f"Error resizing image: {e}")
         return None
 
     def save_profile(self):
@@ -890,8 +798,7 @@ class WorkshopUploader:
             "tags": self.tags_var.get()
         }
         try:
-            with open(f, 'w') as outfile:
-                json.dump(data, outfile, indent=4)
+            self._get_file_manager().save_profile(f, data)
             self.log(f"Profile saved: {os.path.basename(f)}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to save profile: {e}")
@@ -901,17 +808,16 @@ class WorkshopUploader:
         if not f: return
         
         try:
-            with open(f, 'r') as infile:
-                data = json.load(infile)
-                self.mod_path.set(data.get("mod_path", ""))
-                self.preview_path.set(data.get("preview_path", ""))
-                self.title_var.set(data.get("title", ""))
-                self.desc_text.delete("1.0", "end")
-                self.desc_text.insert("1.0", data.get("description", ""))
-                self.visibility_var.set(data.get("visibility", "0 (Public)"))
-                self.item_id_var.set(data.get("item_id", "0"))
-                self.note_var.set(data.get("change_note", ""))
-                self.tags_var.set(data.get("tags", ""))
+            data = self._get_file_manager().load_profile(f)
+            self.mod_path.set(data.get("mod_path", ""))
+            self.preview_path.set(data.get("preview_path", ""))
+            self.title_var.set(data.get("title", ""))
+            self.desc_text.delete("1.0", "end")
+            self.desc_text.insert("1.0", data.get("description", ""))
+            self.visibility_var.set(data.get("visibility", "0 (Public)"))
+            self.item_id_var.set(data.get("item_id", "0"))
+            self.note_var.set(data.get("change_note", ""))
+            self.tags_var.set(data.get("tags", ""))
             self.log(f"Profile loaded: {os.path.basename(f)}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load profile: {e}")
@@ -937,23 +843,10 @@ class WorkshopUploader:
         
         def _worker():
             try:
-                url = "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip"
-                r = self._request_with_retry("GET", url, operation_name="Download SteamCMD", timeout=30)
-                
-                target_dir = os.path.join(self.base_dir, "steamcmd")
-                os.makedirs(target_dir, exist_ok=True)
-                
-                z = zipfile.ZipFile(io.BytesIO(r.content))
-                z.extractall(target_dir)
-                
-                exe_path = os.path.join(target_dir, "steamcmd.exe")
-                if os.path.exists(exe_path):
-                    self.root.after(0, lambda: self.steamcmd_path.set(exe_path))
-                    self.log("SteamCMD successfully downloaded and extracted.")
-                    self.root.after(0, lambda: messagebox.showinfo("Success", "SteamCMD downloaded and path set automatically."))
-                else:
-                    self.log("Error: steamcmd.exe not found after extraction.")
-                    
+                exe_path = self._get_file_manager().download_steamcmd(self.base_dir, self._request_with_retry)
+                self.root.after(0, lambda: self.steamcmd_path.set(exe_path))
+                self.log("SteamCMD successfully downloaded and extracted.")
+                self.root.after(0, lambda: messagebox.showinfo("Success", "SteamCMD downloaded and path set automatically."))
             except Exception as e:
                 self.log(f"Download Error: {e}")
                 self.root.after(0, lambda: messagebox.showerror("Download Error", f"Failed to download SteamCMD: {e}"))
@@ -966,11 +859,15 @@ class WorkshopUploader:
     def toggle_watch_mode(self):
         if self.watch_mode_var.get():
             self.log("Watch Mode enabled.")
+            self.last_watch_signature = None
+            self.last_watch_summary = None
             if not self.watch_thread or not self.watch_thread.is_alive():
                 self.watch_thread = threading.Thread(target=self._watch_loop, daemon=True)
                 self.watch_thread.start()
         else:
             self.log("Watch Mode disabled.")
+            self.last_watch_signature = None
+            self.last_watch_summary = None
 
     def _watch_loop(self):
         import time
@@ -978,24 +875,39 @@ class WorkshopUploader:
             mod_dir = self.mod_path.get()
             if mod_dir and os.path.exists(mod_dir):
                 try:
-                    current_max_time = 0
-                    for root, _, files in os.walk(mod_dir):
-                        for f in files:
-                            t = os.path.getmtime(os.path.join(root, f))
-                            if t > current_max_time: current_max_time = t
-                    
-                    if self.last_scan_time == 0:
-                        self.last_scan_time = current_max_time
-                    elif current_max_time > self.last_scan_time:
-                        self.last_scan_time = current_max_time
+                    inventory = self._build_mod_inventory(mod_dir)
+                    current_signature = self._fingerprint_inventory(inventory)
+
+                    if self.last_watch_signature is None:
+                        self.last_watch_signature = current_signature
+                    elif current_signature != self.last_watch_signature:
+                        self.last_watch_signature = current_signature
                         self.log("Change detected! Scanning...")
-                        issues = self.scan_mod_safety(mod_dir)
-                        issues.extend(self.scan_asset_references(mod_dir))
-                        if issues:
-                            self.log(f"Watch Alert: {len(issues)} issues found.")
-                        else:
-                            self.log("Watch: Files verified.")
-                except Exception as e: pass
+                        findings = self._collect_mod_findings(mod_dir, inventory=inventory)
+                        summary = (
+                            len(findings["issues"]),
+                            len(findings["validation_errors"]),
+                            len(findings["validation_warnings"]),
+                            len(findings["trn_line_endings"]),
+                            len(findings["trn_duplicate_headers"]),
+                            len(findings["legacy_files"]),
+                        )
+                        if summary != self.last_watch_summary:
+                            self.last_watch_summary = summary
+                            if any(summary):
+                                self.log(
+                                    "Watch Alert: "
+                                    f"{summary[0]} safety issues, "
+                                    f"{summary[1]} validation errors, "
+                                    f"{summary[2]} warnings, "
+                                    f"{summary[3]} TRN line-ending issues, "
+                                    f"{summary[4]} duplicate TRN headers, "
+                                    f"{summary[5]} legacy files."
+                                )
+                            else:
+                                self.log("Watch: Files verified.")
+                except Exception as e:
+                    self.log(f"Watch error: {e}")
             time.sleep(3)
 
     def browse_content(self):
@@ -1024,16 +936,11 @@ class WorkshopUploader:
         """Starts the Steam QR Login process."""
         self.log("Initializing QR login...")
         try:
-            # Step 1: Begin Auth Session
-            url = "https://api.steampowered.com/IAuthenticationService/BeginAuthSessionViaQR/v1/"
-            # We use a generic device name
-            data = {
-                "device_friendly_name": f"BZR Uploader ({os.environ.get('COMPUTERNAME', 'Windows')})",
-                "platform_type": 1 # k_EAuthTokenPlatformType_SteamClient
-            }
-            r = requests.post(url, data=data, timeout=10)
-            r.raise_for_status()
-            res = r.json().get("response", {})
+            res = self._get_steam_service().begin_qr_auth_session(
+                device_friendly_name=f"BZR Uploader ({os.environ.get('COMPUTERNAME', 'Windows')})",
+                platform_type=1,
+                timeout=10,
+            )
             
             client_id = res.get("client_id")
             challenge_url = res.get("challenge_url")
@@ -1069,29 +976,24 @@ class WorkshopUploader:
         
         self.qr_label = tk.Label(qr_frame, text="Loading QR...", bg="#ffffff", fg="#000000")
         self.qr_label.pack()
-        
-        # Use external API for QR generation
-        qr_api_url = f"https://api.qrserver.com/v1/create-qr-code/?size=250x250&data={requests.utils.quote(challenge_url)}"
-        
-        def load_qr():
-            try:
-                r = requests.get(qr_api_url, timeout=10)
-                if r.ok:
-                    from io import BytesIO
-                    if HAS_PIL:
-                        img = Image.open(BytesIO(r.content))
-                        from PIL import ImageTk
-                        self.qr_img = ImageTk.PhotoImage(img)
-                        self.qr_label.config(image=self.qr_img, text="")
-                    else:
-                        self.qr_label.config(text="QR Loaded (PIL missing)\nScan the link manually?")
-                        self.log("Warning: PIL missing, cannot display QR image in UI.")
-            except Exception as e:
-                self.qr_label.config(text=f"Failed to load QR\n{e}")
 
-        threading.Thread(target=load_qr, daemon=True).start()
-        
+        try:
+            if HAS_PIL and HAS_QRCODE:
+                qr_img = qrcode.make(challenge_url).resize((250, 250))
+                from PIL import ImageTk
+                self.qr_img = ImageTk.PhotoImage(qr_img)
+                self.qr_label.config(image=self.qr_img, text="")
+            else:
+                self.qr_label.config(text="QR display unavailable.\nOpen the Steam link manually.")
+                self.log("QR image generation unavailable (install 'qrcode' and Pillow).")
+        except Exception as e:
+            self.qr_label.config(text=f"Failed to render QR\n{e}")
+
         ttk.Label(self.qr_win, text="1. Open Steam Mobile App\n2. Go to Steam Guard\n3. Select 'Scan a QR Code'", background="#1a1a1a", foreground="#d4d4d4", justify="left").pack(pady=10)
+        link_box = tk.Text(self.qr_win, height=3, wrap="word", bg="#050505", fg="#d4d4d4", insertbackground="#d4d4d4", font=("Consolas", 9))
+        link_box.pack(fill="x", padx=20, pady=(0, 10))
+        link_box.insert("1.0", challenge_url)
+        link_box.config(state="disabled")
         
         cancel_btn = ttk.Button(self.qr_win, text="CANCEL", command=self.cancel_qr_login)
         cancel_btn.pack(pady=(10, 20))
@@ -1104,11 +1006,11 @@ class WorkshopUploader:
         if not self.qr_session_id: return
         
         try:
-            url = "https://api.steampowered.com/IAuthenticationService/PollAuthSessionStatus/v1/"
-            data = {"client_id": self.qr_session_id, "request_id": self.qr_session_id} 
-            # Actually, the API says "client_id" and we need to check the status.
-            
-            r = requests.post(url, data=data, timeout=5)
+            r = self._get_steam_service().poll_qr_auth_session(
+                client_id=self.qr_session_id,
+                request_id=self.qr_session_id,
+                timeout=5,
+            )
             if r.status_code == 404: # Session expired or invalid
                 self.log("QR Session expired.")
                 self.cancel_qr_login()
@@ -1165,6 +1067,15 @@ class WorkshopUploader:
         self.guard_entry.config(state=state)
         self.qr_btn.config(state=state)
 
+    def _build_mod_inventory(self, mod_dir):
+        return self._get_mod_scanner().build_inventory(mod_dir)
+
+    def _fingerprint_inventory(self, inventory):
+        return self._get_mod_scanner().fingerprint_inventory(inventory)
+
+    def _collect_mod_findings(self, mod_dir, inventory=None):
+        return self._get_mod_scanner().collect_findings(mod_dir, inventory=inventory)
+
     def analyze_memory_usage(self):
         mod_dir = self.mod_path.get()
         if not mod_dir or not os.path.exists(mod_dir):
@@ -1172,260 +1083,20 @@ class WorkshopUploader:
             return
 
         self.log("Analyzing memory footprint...")
-        
-        stats = {
-            "disk_size": 0,
-            "est_vram": 0,
-            "counts": {"Texture": 0, "Model": 0, "Audio": 0, "Script": 0, "Other": 0}
-        }
-
-        non_dds_textures = []
-        all_files = {} # name_lower: full_path
-        
-        def get_uncompressed_size(path):
-            # 4 bytes per pixel (RGBA) + 33% for Mipmaps
-            try:
-                if HAS_PIL:
-                    with Image.open(path) as img:
-                        return (img.width * img.height * 4) * 1.33
-            except Exception: pass
-            # Fallback: File size * 5 (rough compression ratio estimate for PNG/JPG)
-            return os.path.getsize(path) * 5
-
-        for root, _, files in os.walk(mod_dir):
-            for f in files:
-                path = os.path.join(root, f)
-                all_files[f.lower()] = path
-                try:
-                    size = os.path.getsize(path)
-                    stats["disk_size"] += size
-                    
-                    ext = f.lower().split('.')[-1]
-                    
-                    if ext in ['png', 'tga', 'bmp', 'jpg', 'jpeg', 'tif', 'tiff']:
-                        stats["counts"]["Texture"] += 1
-                        stats["est_vram"] += get_uncompressed_size(path)
-                        non_dds_textures.append(f)
-                    elif ext in ['dds']:
-                        stats["counts"]["Texture"] += 1
-                        stats["est_vram"] += size 
-                    elif ext in ['x', 'geo', 'xsi', '3ds']:
-                        stats["counts"]["Model"] += 1
-                        stats["est_vram"] += size * 3 # Rough estimate for vertex buffers
-                    elif ext in ['wav', 'ogg']:
-                        stats["counts"]["Audio"] += 1
-                    elif ext in ['lua', 'odf', 'inf']:
-                        stats["counts"]["Script"] += 1
-                    else:
-                        stats["counts"]["Other"] += 1
-                        
-                except Exception as e:
-                    self.log(f"Skipped {f}: {e}")
-
-        # --- ORPHAN FINDER ---
-        self.log("Scanning for orphaned files...")
-        referenced = set()
-        # Add the main INI/MAP files as implicitly referenced
-        for f in all_files:
-            if f.endswith(('.ini', '.hg2', '.trn', '.mat', '.bzn', '.lgt')):
-                referenced.add(f)
-
-        asset_exts = ('.hg2', '.trn', '.mat', '.bzn', '.lgt', '.bmp', '.des', '.vxt', 
-                      '.wav', '.ogg', '.tga', '.dds', '.x', '.geo', '.xsi', '.3ds', '.png', '.jpg')
-        
-        for path in all_files.values():
-            ext = os.path.splitext(path)[1].lower()
-            if ext in ('.odf', '.material', '.inf', '.lua', '.ini', '.txt'):
-                try:
-                    with open(path, 'r', errors='ignore') as f:
-                        content = f.read()
-                        # Find potential filenames in quotes or after =
-                        potential = re.findall(r'["\']([^"\'\r\n]+)["\']', content)
-                        potential.extend(re.findall(r'=\s*([\w\.\-]+)', content))
-                        
-                        for p in potential:
-                            p_low = p.lower()
-                            if p_low in all_files:
-                                referenced.add(p_low)
-                            else:
-                                # Check if it's a basename reference (common in ODFs)
-                                for a_ext in asset_exts:
-                                    if f"{p_low}{a_ext}" in all_files:
-                                        referenced.add(f"{p_low}{a_ext}")
-                except Exception: pass
-
-        orphans = [f for f in all_files if f not in referenced and not f.endswith('.ini')]
-        
-        disk_mb = stats["disk_size"] / (1024 * 1024)
-        vram_mb = stats["est_vram"] / (1024 * 1024)
-        
-        report = (
-            f"MEMORY ANALYSIS REPORT\n"
-            f"----------------------\n"
-            f"Total Disk Size: {disk_mb:.2f} MB\n"
-            f"Est. Runtime Memory: {vram_mb:.2f} MB\n\n"
-            f"Asset Breakdown:\n"
-            f"  Textures: {stats['counts']['Texture']}\n"
-            f"  Models: {stats['counts']['Model']}\n"
-            f"  Audio: {stats['counts']['Audio']}\n"
-            f"  Scripts: {stats['counts']['Script']}\n"
+        analysis = self._get_memory_analyzer().analyze(mod_dir)
+        report = self._get_memory_analyzer().build_report(analysis)
+        messagebox.showinfo("Memory Analysis", report)
+        self.log(
+            f"Analysis: Disk={analysis['disk_mb']:.1f}MB, "
+            f"Est.Mem={analysis['vram_mb']:.1f}MB, "
+            f"Orphans={len(analysis['orphans'])}"
         )
 
-        if non_dds_textures:
-            report += f"\n[!] WARNING: {len(non_dds_textures)} non-DDS textures found.\n"
-            report += "These will consume more VRAM than DDS (DXT) compressed files.\n"
+    def scan_mod_safety(self, mod_dir, inventory=None):
+        return self._get_mod_scanner().scan_mod_safety(mod_dir, inventory=inventory)
 
-        if orphans:
-            report += f"\n[?] ORPHANS: {len(orphans)} files appear unused:\n"
-            for o in orphans[:10]: report += f"  - {o}\n"
-            if len(orphans) > 10: report += f"  ... and {len(orphans)-10} more.\n"
-            report += "\n(Check carefully before deleting; scripts may use dynamic names.)"
-
-        if vram_mb > 2000:
-            report += f"\n\n[!] CRITICAL: Est. VRAM usage ({vram_mb:.0f}MB) is very high!\n"
-            report += "Battlezone 98 Redux may crash on lower-end hardware."
-        elif vram_mb > 1000:
-            report += f"\n\n[!] WARNING: Est. VRAM usage ({vram_mb:.0f}MB) is high.\n"
-            report += "Consider using DDS (DXT) for large textures."
-
-        messagebox.showinfo("Memory Analysis", report)
-        self.log(f"Analysis: Disk={disk_mb:.1f}MB, Est.Mem={vram_mb:.1f}MB, Orphans={len(orphans)}")
-
-    def scan_mod_safety(self, mod_dir):
-        allowed_headers = set()
-        allowed_params = {}
-        
-        header_list_path = os.path.join(self.resource_dir, "odfHeaderList.txt")
-        if os.path.exists(header_list_path):
-            with open(header_list_path, 'r') as f:
-                allowed_headers = {line.strip() for line in f if line.strip()}
-        
-        params_list_path = os.path.join(self.resource_dir, "bzrODFparams.txt")
-        if os.path.exists(params_list_path):
-            current_class = None
-            with open(params_list_path, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('-') or line.startswith('//'): continue
-                    
-                    if line.startswith('[') and line.endswith(']'):
-                        current_class = line[1:-1]
-                        # Filter out garbage headers if any exist in the file
-                        if re.match(r'^[A-Za-z0-9_]+$', current_class):
-                            allowed_params[current_class] = set()
-                        else:
-                            current_class = None
-                    elif current_class:
-                        # Handle "paramName? -comment" -> "paramName"
-                        # Also strip trailing '?' if present
-                        parts = line.split()
-                        if parts:
-                            param = parts[0].rstrip('?')
-                            allowed_params[current_class].add(param)
-
-        if not allowed_headers:
-            return []
-
-        issues = []
-        for root, _, files in os.walk(mod_dir):
-            for file in files:
-                if file.lower().endswith(".odf"):
-                    path = os.path.join(root, file)
-                    try:
-                        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                            current_header = None
-                            current_header_line = 0
-                            found_params = set()
-
-                            for i, line in enumerate(f):
-                                line = line.split('//')[0].split('--')[0].strip() # Strip comments
-                                if not line: continue
-                                if line.startswith("//") or line.startswith("--"): continue
-                                
-                                if line.startswith('[') and line.endswith(']'):
-                                    # Check previous header for missing params
-                                    if current_header and current_header in allowed_params:
-                                        missing = allowed_params[current_header] - found_params
-                                        if missing:
-                                            issues.append((path, "Missing Fields", f"[{current_header}] missing: {', '.join(missing)}", current_header_line))
-
-                                    header = line[1:-1]
-                                    current_header = header
-                                    current_header_line = i + 1
-                                    found_params = set()
-
-                                    if header not in allowed_headers:
-                                        issues.append((path, "Invalid Header", header, i+1))
-                                
-                                elif '=' in line and current_header:
-                                    key = line.split('=')[0].strip()
-                                    if current_header in allowed_params:
-                                        if key not in allowed_params[current_header]:
-                                            issues.append((path, "Unknown Field", f"[{current_header}] {key}", i+1))
-                                        else:
-                                            found_params.add(key)
-                            
-                            # Check last header
-                            if current_header and current_header in allowed_params:
-                                missing = allowed_params[current_header] - found_params
-                                if missing:
-                                    issues.append((path, "Missing Fields", f"[{current_header}] missing: {', '.join(missing)}", current_header_line))
-
-                    except Exception as e:
-                        self.log(f"Warning: Could not scan {file}: {e}")
-        return issues
-
-    def scan_asset_references(self, mod_dir):
-        issues = []
-        existing_files = set()
-        files_to_process = []
-
-        # Pre-compile regexes
-        odf_pattern = re.compile(r'(geometryName|cockpitName|turretName)\s*=\s*"([^"]+)"', re.IGNORECASE)
-        material_pattern = re.compile(r'texture\s+([^\s]+)', re.IGNORECASE)
-
-        # Collect existing files and files to process in a single pass
-        for root, _, files in os.walk(mod_dir):
-            files_in_dir = []
-            for f in files:
-                f_lower = f.lower()
-                existing_files.add(f_lower)
-                # Only track files we actually need to parse
-                if f_lower.endswith(".odf") or f_lower.endswith(".material"):
-                    files_in_dir.append((f, f_lower))
-            if files_in_dir:
-                files_to_process.append((root, files_in_dir))
-
-        # Process collected files
-        for root, files in files_to_process:
-            for file, file_lower in files:
-                is_odf = file_lower.endswith(".odf")
-                path = os.path.join(root, file)
-                try:
-                    # Add encoding='utf-8' per memory guidelines
-                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                        for i, line in enumerate(f):
-                            # Optimize line parsing: skip split/strip if not needed
-                            if '//' in line:
-                                line = line.split('//')[0]
-                            line = line.strip()
-                            if not line:
-                                continue
-                            
-                            if is_odf:
-                                match = odf_pattern.search(line)
-                                if match:
-                                    asset = match.group(2).lower()
-                                    if asset and asset not in existing_files:
-                                        issues.append((path, "Missing Asset", f"Missing {match.group(1)}: {asset}", i+1))
-                            else:  # is_material
-                                match = material_pattern.search(line)
-                                if match:
-                                    asset = match.group(1).lower()
-                                    if asset and asset not in existing_files:
-                                        issues.append((path, "Missing Asset", f"Missing texture: {asset}", i+1))
-                except Exception: pass
-        return issues
+    def scan_asset_references(self, mod_dir, inventory=None):
+        return self._get_mod_scanner().scan_asset_references(mod_dir, inventory=inventory)
 
     def show_safety_warning(self, issues):
         win = tk.Toplevel(self.root)
@@ -1455,11 +1126,9 @@ class WorkshopUploader:
         vsb.pack(side="right", fill="y")
         
         issue_map = {}
-        for path, issue_type, detail, line in issues:
-            try: rel_path = os.path.relpath(path, self.mod_path.get())
-            except Exception: rel_path = path
-            item_id = tree.insert("", "end", values=(rel_path, issue_type, detail, line))
-            issue_map[item_id] = path
+        for row in self._get_upload_preflight().build_safety_rows(issues, self.mod_path.get()):
+            item_id = tree.insert("", "end", values=(row["display_path"], row["issue_type"], row["detail"], row["line"]))
+            issue_map[item_id] = row["full_path"]
             
         def on_open():
             sel = tree.selection()
@@ -1495,199 +1164,25 @@ class WorkshopUploader:
         return getattr(win, 'result', False)
 
     def apply_quick_fixes(self, issues):
-        fixed_count = 0
-        weapon_mask_re = re.compile(r'(weaponMask\s*=\s*)["\']?0+["\']?', re.IGNORECASE)
-        missing_fields_re = re.compile(r'missing:\s*(.+)')
+        return self._get_content_fixer().apply_quick_fixes(issues)
 
-        for path, issue_type, detail, line_num in issues:
-            try:
-                # Fix 1: WeaponMask Crash
-                if issue_type == "Crash Risk" and "weaponMask" in detail:
-                    with open(path, 'r', encoding="utf-8", errors="ignore") as f: lines = f.readlines()
-                    if line_num <= len(lines):
-                        # Replace 00000 with 00001
-                        lines[line_num-1] = weapon_mask_re.sub(r'\1"00001"', lines[line_num-1])
-                        with open(path, 'w') as f: f.writelines(lines)
-                        fixed_count += 1
-                
-                # Fix 2: Missing Fields
-                elif issue_type == "Missing Fields":
-                    # Detail format: "[Header] missing: key1, key2"
-                    match = missing_fields_re.search(detail)
-                    if match:
-                        keys = [k.strip() for k in match.group(1).split(',')]
-                        with open(path, 'a', encoding="utf-8") as f:
-                            f.write(f"\n// Auto-fixed missing fields\n")
-                            for k in keys:
-                                f.write(f"{k} = 0\n")
-                        fixed_count += 1
-            except Exception as e:
-                self.log(f"Quick Fix failed for {os.path.basename(path)}: {e}")
-        return fixed_count
+    def scan_trn_safety(self, mod_dir, inventory=None):
+        return self._get_mod_scanner().scan_trn_safety(mod_dir, inventory=inventory)
 
-    def scan_trn_safety(self, mod_dir):
-        le_issues = []
-        dup_issues = []
-        for root, _, files in os.walk(mod_dir):
-            for file in files:
-                if file.lower().endswith(".trn"):
-                    path = os.path.join(root, file)
-                    try:
-                        with open(path, 'r', encoding='utf-8', errors='ignore', newline='') as f:
-                            text = f.read()
-                        
-                        if re.search(r'(?<!\r)\n', text) or re.search(r'\r(?!\n)', text):
-                            le_issues.append(path)
-                        
-                        # Check for duplicate [Size] headers
-                        if len(re.findall(r'^\s*\[Size\]', text, re.MULTILINE | re.IGNORECASE)) > 1:
-                            dup_issues.append(path)
-                            
-                    except Exception as e:
-                        self.log(f"Warning: Could not scan TRN {file}: {e}")
-        return le_issues, dup_issues
-
-    def scan_legacy_files(self, mod_dir):
-        legacy_files = []
-        for root, _, files in os.walk(mod_dir):
-            for f in files:
-                if f.lower().endswith(".map"):
-                    legacy_files.append(os.path.join(root, f))
-        return legacy_files
+    def scan_legacy_files(self, mod_dir, inventory=None):
+        return self._get_mod_scanner().scan_legacy_files(mod_dir, inventory=inventory)
 
     def delete_legacy_files(self, files):
-        count = 0
-        for path in files:
-            try:
-                os.remove(path)
-                count += 1
-            except Exception as e:
-                self.log(f"Error deleting {path}: {e}")
-        return count
+        return self._get_content_fixer().delete_legacy_files(files)
 
     def fix_trn_files(self, files):
-        count = 0
-        for path in files:
-            try:
-                with open(path, 'r', encoding='utf-8', errors='ignore', newline='') as f:
-                    content = f.read()
-                
-                # Normalize to CRLF
-                content = content.replace('\r\n', '\n').replace('\r', '\n').replace('\n', '\r\n')
-                
-                with open(path, 'w', encoding='utf-8', newline='') as f:
-                    f.write(content)
-                count += 1
-            except Exception as e:
-                self.log(f"Error fixing {path}: {e}")
-        return count
+        return self._get_content_fixer().fix_trn_files(files)
 
     def fix_trn_duplicates(self, files):
-        count = 0
-        for path in files:
-            try:
-                with open(path, 'r', encoding='utf-8', errors='ignore') as f:
-                    lines = f.readlines()
-                
-                new_lines = []
-                size_found = False
-                skip_mode = False
-                
-                for line in lines:
-                    # Strip comments for checking
-                    clean = line.split('//')[0].split('--')[0].strip().lower()
-                    
-                    if clean == "[size]":
-                        if size_found:
-                            skip_mode = True
-                        else:
-                            size_found = True
-                            skip_mode = False
-                            new_lines.append(line)
-                    elif clean.startswith("[") and clean.endswith("]"):
-                        skip_mode = False
-                        new_lines.append(line)
-                    else:
-                        if not skip_mode:
-                            new_lines.append(line)
-                            
-                with open(path, 'w', encoding='utf-8') as f:
-                    f.writelines(new_lines)
-                count += 1
-            except Exception as e:
-                self.log(f"Error fixing {path}: {e}")
-        return count
+        return self._get_content_fixer().fix_trn_duplicates(files)
 
     def validate_content_structure(self, mod_dir):
-        errors = []
-        warnings = []
-        
-        try:
-            files = os.listdir(mod_dir)
-        except Exception as e:
-            errors.append(f"Could not access content folder: {e}")
-            return errors, warnings
-
-        # Remove desktop.ini if present
-        for f in files[:]:
-            if f.lower() == "desktop.ini":
-                try:
-                    os.remove(os.path.join(mod_dir, f))
-                    self.log(f"Removed hidden system file: {f}")
-                    files.remove(f)
-                except Exception as e:
-                    self.log(f"Warning: Could not remove {f}: {e}")
-
-        ini_files = [f for f in files if f.lower().endswith(".ini") and os.path.isfile(os.path.join(mod_dir, f))]
-        
-        if not ini_files:
-            errors.append("Missing configuration (.ini) file in content root.")
-            return errors, warnings
-            
-        target_ini = ini_files[0]
-        ini_path = os.path.join(mod_dir, target_ini)
-        
-        config = configparser.ConfigParser()
-        try:
-            with open(ini_path, 'r', encoding='utf-8-sig') as f:
-                config.read_file(f)
-        except Exception:
-            try:
-                config.read(ini_path)
-            except Exception as e:
-                errors.append(f"Failed to parse {target_ini}: {e}")
-                return errors, warnings
-
-        if "WORKSHOP" not in config:
-            errors.append(f"{target_ini} missing [WORKSHOP] section.")
-            return errors, warnings
-            
-        map_type = config["WORKSHOP"].get("maptype", "").lower().strip().strip('"').strip("'")
-        valid_types = ["instant_action", "multiplayer", "mod"]
-        
-        if map_type not in valid_types:
-            errors.append(f"Invalid mapType '{map_type}' in {target_ini}.\nMust be one of: {', '.join(valid_types)}")
-            return errors, warnings
-            
-        base_name = os.path.splitext(target_ini)[0]
-        files_lower = set(f.lower() for f in files)
-        
-        def check_ext(ext, required=True):
-            if f"{base_name}{ext}".lower() not in files_lower:
-                (errors if required else warnings).append(f"Missing {'essential' if required else 'optional'} file: {base_name}{ext}")
-
-        if map_type in ["multiplayer", "instant_action"]:
-            for ext in [".hg2", ".trn", ".mat", ".bzn", ".lgt"]: check_ext(ext)
-            
-            if map_type == "multiplayer":
-                for ext in [".bmp", ".des", ".vxt"]: check_ext(ext, required=False)
-                if "MULTIPLAYER" not in config:
-                    errors.append(f"{target_ini} missing [MULTIPLAYER] section.")
-                else:
-                    for key in ["minplayers", "maxplayers", "gametype"]:
-                        if key not in config["MULTIPLAYER"]: warnings.append(f"[MULTIPLAYER] missing '{key}'")
-
-        return errors, warnings
+        return self._get_mod_scanner().validate_content_structure(mod_dir)
 
     def open_workshop_page(self):
         item_id = self.item_id_var.get()
@@ -1713,19 +1208,8 @@ class WorkshopUploader:
         self.root.after(0, _update)
 
     def start_upload(self):
-        # Validation
         title = self.title_var.get()
-        if len(title) > STEAM_TITLE_LIMIT:
-            messagebox.showerror("Title Too Long", f"Your title is {len(title)} characters long. The maximum is {STEAM_TITLE_LIMIT}.")
-            return
-        if not title:
-            messagebox.showerror("Missing Title", "The workshop item must have a title.")
-            return
-
         desc = self.desc_text.get("1.0", "end-1c")
-        if len(desc) > STEAM_DESC_LIMIT:
-            messagebox.showerror("Description Too Long", f"Your description is {len(desc)} characters long. The maximum is {STEAM_DESC_LIMIT}.")
-            return
 
         sc = self.steamcmd_path.get()
         content = self.mod_path.get()
@@ -1733,27 +1217,33 @@ class WorkshopUploader:
         user = self.username_var.get().strip()
         pwd = self.password_var.get()
         use_cached = self.use_cached_creds_var.get()
-        
-        if not all([sc, content, preview]):
-            messagebox.showerror("Error", "Missing required fields (SteamCMD, Content Folder, Preview Image).")
+
+        validation_error = self._get_upload_preflight().validate_inputs(
+            title=title,
+            description=desc,
+            steamcmd_path=sc,
+            content_path=content,
+            preview_path=preview,
+            username=user,
+            use_cached_creds=use_cached,
+            title_limit=STEAM_TITLE_LIMIT,
+            description_limit=STEAM_DESC_LIMIT,
+        )
+        if validation_error:
+            messagebox.showerror(validation_error[0], validation_error[1])
             return
 
-        if not use_cached and not user:
-            messagebox.showerror("Error", "Steam Username is required unless 'USE CACHED CREDENTIALS' is enabled.")
-            return
-            
-        if not os.path.exists(sc):
-            messagebox.showerror("Error", "SteamCMD executable not found.")
-            return
+        inventory = self._build_mod_inventory(content)
+        findings = self._collect_mod_findings(content, inventory=inventory)
 
         # Safety Check
-        issues = self.scan_mod_safety(content)
-        issues.extend(self.scan_asset_references(content))
+        issues = findings["issues"]
         if issues:
             if not self.show_safety_warning(issues): return
 
         # Content Validity Check
-        val_errors, val_warnings = self.validate_content_structure(content)
+        val_errors = findings["validation_errors"]
+        val_warnings = findings["validation_warnings"]
         if val_errors:
             messagebox.showerror("Validation Error", "Content Validation Failed:\n\n" + "\n".join(val_errors))
             return
@@ -1762,7 +1252,8 @@ class WorkshopUploader:
                 return
 
         # TRN Checks
-        le_issues, dup_issues = self.scan_trn_safety(content)
+        le_issues = findings["trn_line_endings"]
+        dup_issues = findings["trn_duplicate_headers"]
         
         if dup_issues:
              if messagebox.askyesno("TRN Format Warning", 
@@ -1785,7 +1276,7 @@ class WorkshopUploader:
                 return
 
         # Legacy MAP Check
-        legacy_maps = self.scan_legacy_files(content)
+        legacy_maps = findings["legacy_files"]
         if legacy_maps:
             if messagebox.askyesno("Legacy Content Warning", 
                                    f"Found {len(legacy_maps)} .map files.\n"
@@ -1804,12 +1295,10 @@ class WorkshopUploader:
         
         # Create VDF
         try:
-            vdf_path = os.path.join(self.base_dir, "upload.vdf")
             appid = self.games[self.game_var.get()]["appid"]
-            desc = self.desc_text.get("1.0", "end-1c")
             vis = self.visibility_var.get().split()[0]
-
-            vdf_content = self._build_upload_vdf_content(
+            vdf_path = self._get_upload_preflight().write_upload_vdf(
+                base_dir=self.base_dir,
                 appid=appid,
                 publishedfileid=self.item_id_var.get(),
                 contentfolder=content,
@@ -1818,16 +1307,14 @@ class WorkshopUploader:
                 title=self.title_var.get(),
                 description=desc,
                 changenote=self.note_var.get(),
+                build_upload_vdf_content=self._build_upload_vdf_content,
             )
-            with open(vdf_path, "w", encoding="utf-8") as f:
-                f.write(vdf_content)
             self.log(f"Generated VDF at {vdf_path}")
             
         except Exception as e:
             self.log(f"Error creating VDF: {e}")
             return
 
-        vdf_path = os.path.join(self.base_dir, "upload.vdf")
         # Run SteamCMD
         # We use a separate thread to not freeze UI, but we might need a new console for 2FA
         self._set_busy("Upload", True)
@@ -1837,33 +1324,23 @@ class WorkshopUploader:
         self.log("Starting SteamCMD...")
         
         use_cached = self.use_cached_creds_var.get()
-        cmd = [exe, "+login"]
-        if user:
-            cmd.append(user)
-        
-        if not use_cached:
-            if not user:
-                self.log("Execution Error: Username is required when cached credentials are disabled.")
-                self._set_busy("Upload", False)
-                return
-            if pwd:
-                cmd.append(pwd)
-            guard_code = self.steam_guard_var.get()
-            if guard_code:
-                cmd.append(guard_code)
-        else:
+        guard_code = self.steam_guard_var.get()
+        if use_cached:
             if user:
                 self.log(f"Attempting login using cached credentials for '{user}'...")
             else:
                 self.log("Attempting login using cached credentials (no username provided)...")
-            
-        cmd.extend(["+workshop_build_item", vdf, "+quit"])
         
         try:
-            # On Windows, CREATE_NEW_CONSOLE allows user to interact (enter 2FA) if needed
-            creation_flags = subprocess.CREATE_NEW_CONSOLE if IS_WINDOWS else 0
-            
-            self.steamcmd_process = subprocess.Popen(cmd, creationflags=creation_flags)
+            self.steamcmd_process, _cmd = self._get_workshop_backend().launch_steamcmd(
+                exe=exe,
+                user=user,
+                pwd=pwd,
+                vdf=vdf,
+                use_cached=use_cached,
+                guard_code=guard_code,
+                is_windows=IS_WINDOWS,
+            )
             self.steamcmd_process.wait()
             p = self.steamcmd_process
             self.steamcmd_process = None
@@ -1924,102 +1401,33 @@ class WorkshopUploader:
         return True
 
     def _resolve_vanity_to_steamid(self, vanity, api_key):
-        url = "https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/"
-        r = self._request_with_retry(
-            "GET",
-            url,
-            operation_name="Resolve vanity URL",
-            params={"key": api_key, "vanityurl": vanity},
-            timeout=10
+        return self._get_steam_service().resolve_vanity_to_steamid(
+            vanity,
+            api_key,
+            retry_kwargs={
+                "attempts": REQUEST_RETRY_ATTEMPTS,
+                "backoff": REQUEST_BACKOFF_SECONDS,
+            },
         )
-        data = r.json().get("response", {})
-        if data.get("success") == 1:
-            return data.get("steamid")
-        return None
 
     def resolve_steam_id(self, identity_input, api_key):
-        text = (identity_input or "").strip()
-        if not text:
-            return None
-
-        # Direct SteamID64 input
-        if text.isdigit() and len(text) == 17:
-            return text
-
-        # https://steamcommunity.com/profiles/<steamid64>
-        profiles_match = re.search(r"steamcommunity\.com/profiles/(\d{17})", text, re.IGNORECASE)
-        if profiles_match:
-            return profiles_match.group(1)
-
-        vanity = text
-        # https://steamcommunity.com/id/<vanity>
-        vanity_match = re.search(r"steamcommunity\.com/id/([^/?#]+)", text, re.IGNORECASE)
-        if vanity_match:
-            vanity = vanity_match.group(1)
-        else:
-            vanity = re.sub(r"^https?://", "", vanity, flags=re.IGNORECASE).strip().strip("/")
-            if vanity.lower().startswith("id/"):
-                vanity = vanity[3:].strip("/")
-
-        if vanity:
-            try:
-                return self._resolve_vanity_to_steamid(vanity, api_key)
-            except Exception:
-                return None
-        return None
+        return self._get_steam_service().resolve_steam_id(
+            identity_input,
+            api_key,
+            retry_kwargs={
+                "attempts": REQUEST_RETRY_ATTEMPTS,
+                "backoff": REQUEST_BACKOFF_SECONDS,
+            },
+        )
 
     def _extract_loginusers_accounts(self, vdf_path):
-        with open(vdf_path, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-
-        parsed = self._parse_vdf_text(content)
-        users = self._dict_get_ci(parsed, "users", {})
-        if not isinstance(users, dict):
-            return []
-
-        accounts = []
-        for steam_id, info in users.items():
-            if not (str(steam_id).isdigit() and len(str(steam_id)) == 17):
-                continue
-            accounts.append({
-                "steamid": str(steam_id),
-                "account_name": str(self._dict_get_ci(info, "AccountName", "")).strip(),
-                "persona_name": str(self._dict_get_ci(info, "PersonaName", "")).strip(),
-                "most_recent": str(self._dict_get_ci(info, "MostRecent", "")).strip()
-            })
-        return accounts
+        return self._get_steam_service().extract_loginusers_accounts(vdf_path)
 
     def detect_local_steam_identity(self):
-        candidates = []
-
-        steamcmd_exe = self.steamcmd_path.get().strip()
-        if steamcmd_exe:
-            candidates.append(os.path.join(os.path.dirname(steamcmd_exe), "config", "loginusers.vdf"))
-
-        for env_var in ("PROGRAMFILES(X86)", "PROGRAMFILES"):
-            base = os.environ.get(env_var, "")
-            if base:
-                candidates.append(os.path.join(base, "Steam", "config", "loginusers.vdf"))
-
-        candidates.append(os.path.join(self.base_dir, "steamcmd", "config", "loginusers.vdf"))
-
-        seen = set()
-        for path in candidates:
-            norm = os.path.normpath(path)
-            if norm in seen or not os.path.exists(norm):
-                continue
-            seen.add(norm)
-            try:
-                accounts = self._extract_loginusers_accounts(norm)
-                if not accounts:
-                    continue
-                accounts.sort(key=lambda a: (a.get("most_recent") != "1", a.get("account_name", "")))
-                account = accounts[0]
-                account["source"] = norm
-                return account
-            except Exception:
-                continue
-        return None
+        return self._get_steam_service().detect_local_steam_identity(
+            steamcmd_exe=self.steamcmd_path.get().strip(),
+            base_dir=self.base_dir,
+        )
 
     def use_local_steam_identity(self):
         account = self.detect_local_steam_identity()
@@ -2057,33 +1465,28 @@ class WorkshopUploader:
 
     def _refresh_worker(self, identity_input):
         try:
-            # 1. Get SteamID
             api_key = self.api_key_var.get()
-            steam_id = self.resolve_steam_id(identity_input, api_key)
+            appid = self.games[self.game_var.get()]["appid"]
+            steam_id, items = self._get_workshop_backend().query_workshop_items(
+                api_key=api_key,
+                identity_input=identity_input,
+                appid=appid,
+                resolve_steam_id=self.resolve_steam_id,
+            )
 
             if not steam_id:
                 self.root.after(0, lambda: self.log("Error: Could not resolve owner. Use SteamID64, profile URL, vanity URL, or 'USE CURRENT STEAM LOGIN'."))
                 return
 
             self.root.after(0, lambda: self.manage_identity_var.set(steam_id))
-
-            # 2. Query items
-            appid = self.games[self.game_var.get()]["appid"]
-            query_url = f"https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
-            params = {
-                "key": api_key, "creator_appid": appid, "appid": appid,
-                "numperpage": 100, "return_metadata": 1, "steamid": steam_id
-            }
-            r = self._request_with_retry("GET", query_url, operation_name="Query Workshop files", params=params, timeout=10)
-            items = r.json().get("response", {}).get("publishedfiledetails", [])
             
             self.root.after(0, lambda: self.tree.delete(*self.tree.get_children()))
             
-            vis_map = {0: "Public", 1: "Friends", 2: "Private"}
             for item in items:
-                ts = datetime.fromtimestamp(item['time_updated']).strftime('%Y-%m-%d %H:%M')
-                vis = vis_map.get(item['visibility'], "Unknown")
-                self.root.after(0, lambda i=item, v=vis, t=ts: self.tree.insert("", "end", values=(i['title'], i['publishedfileid'], v, t)))
+                self.root.after(
+                    0,
+                    lambda i=item: self.tree.insert("", "end", values=(i["title"], i["publishedfileid"], i["visibility_label"], i["updated_label"]))
+                )
 
         except Exception as e:
             self.root.after(0, lambda: self.log(f"API Error: {self._friendly_api_error(e)}"))
@@ -2106,18 +1509,12 @@ class WorkshopUploader:
         
         def _worker():
             try:
-                # IPublishedFileService/Update/v1
-                url = "https://api.steampowered.com/IPublishedFileService/Update/v1/"
-                # The API usually expects tags to be passed as tags[0], tags[1]...
-                data = {
-                    "key": api_key,
-                    "publishedfileid": item_id,
-                    "appid": self.games[self.game_var.get()]["appid"],
-                }
-                for i, tag in enumerate(tags):
-                    data[f"tags[{i}]"] = tag
-                
-                self._request_with_retry("POST", url, operation_name="Update Workshop tags", data=data, timeout=10)
+                self._get_workshop_backend().update_workshop_tags(
+                    api_key=api_key,
+                    item_id=item_id,
+                    appid=self.games[self.game_var.get()]["appid"],
+                    tags=tags,
+                )
                 self.log("Workshop tags updated successfully via Web API.")
             except Exception as e:
                 self.log(f"Tag Update Error: {self._friendly_api_error(e)}")
@@ -2137,30 +1534,20 @@ class WorkshopUploader:
     def _prepare_update_worker(self, item_id):
         try:
             api_key = self.api_key_var.get()
-            url = "https://api.steampowered.com/IPublishedFileService/GetPublishedFileDetails/v1/"
-            r = self._request_with_retry(
-                "POST",
-                url,
-                operation_name="Fetch Workshop item details",
-                data={"key": api_key, "itemcount": 1, "publishedfileids[0]": item_id},
-                timeout=10
-            )
-            
-            details = r.json().get("response", {}).get("publishedfiledetails", [{}])[0]
+            details = self._get_workshop_backend().fetch_workshop_item_details(api_key=api_key, item_id=item_id)
             if not details:
                 self.root.after(0, lambda: self.log(f"Could not fetch details for {item_id}"))
                 return
 
-            # Download preview image
             preview_url = details.get("preview_url")
             preview_local_path = ""
             if preview_url:
-                img_res = self._request_with_retry("GET", preview_url, operation_name="Download Workshop preview", stream=True, timeout=10)
-                if img_res.ok:
+                preview_bytes = self._get_workshop_backend().download_preview_bytes(preview_url)
+                if preview_bytes:
                     preview_local_path = os.path.join(self.temp_dir, f"{item_id}.jpg")
-                    with open(preview_local_path, 'wb') as f: f.write(img_res.content)
+                    with open(preview_local_path, 'wb') as f:
+                        f.write(preview_bytes)
             
-            # Map visibility int to combobox string
             vis_map = {0: "0 (Public)", 1: "1 (Friends)", 2: "2 (Private)"}
             vis_str = vis_map.get(details.get("visibility"), "0 (Public)")
 
@@ -2182,23 +1569,8 @@ class WorkshopUploader:
     def analyze_last_upload_log(self):
         sc_exe = self.steamcmd_path.get()
         if not sc_exe: return None
-        
-        base_dir = os.path.dirname(sc_exe)
         appid = self.games[self.game_var.get()]["appid"]
-        log_path = os.path.join(base_dir, "workshopbuilds", f"depot_build_{appid}.log")
-        
-        if not os.path.exists(log_path):
-            return None
-            
-        try:
-            with open(log_path, 'r', errors='ignore') as f:
-                lines = f.readlines()
-                
-            errors = [l.strip() for l in lines if "error" in l.lower() or "failed" in l.lower()]
-            if errors:
-                return "\n".join(errors[-5:]) # Last 5 errors
-        except Exception: pass
-        return None
+        return self._get_workshop_backend().analyze_last_upload_log(sc_exe, appid)
 
     def show_steam_logs(self):
         sc_exe = self.steamcmd_path.get()
@@ -2206,13 +1578,8 @@ class WorkshopUploader:
             messagebox.showerror("Error", "SteamCMD path not set.")
             return
             
-        base_dir = os.path.dirname(sc_exe)
         appid = self.games[self.game_var.get()]["appid"]
-        
-        logs = [
-            ("Build Log", os.path.join(base_dir, "workshopbuilds", f"depot_build_{appid}.log")),
-            ("Transfer Log", os.path.join(base_dir, "logs", "Workshop_log.txt"))
-        ]
+        logs = self._get_workshop_backend().get_log_paths(sc_exe, appid)
         
         win = tk.Toplevel(self.root)
         win.title("SteamCMD Logs")
