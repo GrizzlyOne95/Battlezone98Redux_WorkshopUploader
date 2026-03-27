@@ -8,12 +8,14 @@ from tkinter import ttk, filedialog, messagebox
 import ctypes
 import re
 import requests
+from datetime import datetime, timezone
 from mod_scanner import ModScanner
 from steam_service import SteamService
 from workshop_backend import WorkshopBackend
 from memory_analyzer import MemoryAnalyzer
 from content_fixes import ContentFixer
 from app_file_manager import AppFileManager
+from project_store import ProjectStore
 from upload_preflight import UploadPreflight
 from steamworks_tags import SteamworksTagUpdater
 
@@ -208,7 +210,7 @@ class WorkshopUploader:
     def __init__(self, root):
         self.root = root
         self.root.title("Battlezone Workshop Uploader")
-        self.root.geometry("1000x800")
+        self.root.geometry("1360x900")
         
         if getattr(sys, 'frozen', False):
             self.base_dir = os.path.dirname(sys.executable)
@@ -226,6 +228,7 @@ class WorkshopUploader:
 
         self.steamcmd_process = None
         self.file_manager = AppFileManager(logger=self.log, has_pil=HAS_PIL, image_module=Image if HAS_PIL else None)
+        self.project_store = ProjectStore(self.profiles_dir, self.file_manager)
         self.upload_preflight = UploadPreflight(logger=self.log)
         self.steamworks_tag_updater = SteamworksTagUpdater(logger=self.log)
 
@@ -251,13 +254,13 @@ class WorkshopUploader:
         self.game_var = tk.StringVar(value=last_game)
         
         self.mod_path = tk.StringVar()
+        self.mod_path.trace_add("write", self._on_mod_path_changed)
         self.preview_path = tk.StringVar()
         self.title_var = tk.StringVar()
         self.title_var.trace_add("write", self._update_title_counter)
-        self.desc_var = tk.StringVar()
         self.note_var = tk.StringVar(value="Initial Release")
         self.tags_var = tk.StringVar()
-        self.visibility_var = tk.StringVar(value="0") # 0=Public, 1=Friends, 2=Private
+        self.visibility_var = tk.StringVar(value="0 (Public)")
         self.item_id_var = tk.StringVar(value="0")
         self.item_id_var.trace_add("write", self._update_upload_mode_indicator)
         
@@ -272,7 +275,15 @@ class WorkshopUploader:
         self._active_operations = set()
         self._busy_lock = threading.Lock()
         self._warned_no_keyring = False
-        
+        self.current_project_profile_path = ""
+        self.current_inventory = []
+        self.current_findings = None
+        self.current_readiness = None
+        self.current_project_data = {}
+        self.current_project_signature = None
+        self.pending_publish_signature = None
+        self.pending_publish_inventory = None
+
         self.qr_session_id = None
         self.qr_poll_timer = None
         
@@ -285,9 +296,19 @@ class WorkshopUploader:
         self.workshop_backend = WorkshopBackend(self.steam_service, logger=self.log)
         self.memory_analyzer = MemoryAnalyzer(logger=self.log, has_pil=HAS_PIL, image_module=Image if HAS_PIL else None)
         self.content_fixer = ContentFixer(logger=self.log)
+        self.project_name_var = tk.StringVar(value="NO PROJECT")
+        self.project_hint_var = tk.StringVar(value="Select a mod folder to begin.")
+        self.publish_target_var = tk.StringVar(value="TARGET: CREATE NEW ITEM")
+        self.last_upload_var = tk.StringVar(value="LAST PUBLISH: NONE")
+        self.changed_since_upload_var = tk.StringVar(value="CHANGED FILES: UNKNOWN")
+        self.readiness_summary_var = tk.StringVar(value="Readiness: Select a content folder.")
+        self.readiness_detail_var = tk.StringVar(value="")
+        self.library_status_var = tk.StringVar(value="Workshop library not loaded.")
+        self.project_filter_var = tk.StringVar()
         
         self.setup_styles()
         self.setup_ui()
+        self.refresh_recent_projects()
 
         # Load API key from secure storage; migrate legacy config value if present.
         self._load_api_key_from_secure_store()
@@ -335,6 +356,399 @@ class WorkshopUploader:
         except Exception:
             pass
         self._save_api_key_to_secure_store()
+
+    def _get_desc_text_value(self):
+        if hasattr(self, "desc_text"):
+            try:
+                return self.desc_text.get("1.0", "end-1c")
+            except Exception:
+                return ""
+        return ""
+
+    def _set_desc_text_value(self, value):
+        if not hasattr(self, "desc_text"):
+            return
+        try:
+            self.desc_text.delete("1.0", "end")
+            self.desc_text.insert("1.0", value or "")
+        except Exception:
+            return
+        self._update_desc_counter()
+
+    def _normalize_visibility_value(self, value):
+        text = str(value or "").strip()
+        if not text:
+            return "0 (Public)"
+        if text in ("0", "1", "2"):
+            labels = {"0": "Public", "1": "Friends", "2": "Private"}
+            return f"{text} ({labels[text]})"
+        return text
+
+    def _visibility_code(self):
+        text = self._normalize_visibility_value(self.visibility_var.get())
+        return text.split()[0]
+
+    def _build_inventory_snapshot(self, inventory):
+        snapshot = {}
+        for entry in inventory or []:
+            snapshot[entry["rel_path"]] = {
+                "size": entry["size"],
+                "mtime_ns": entry["mtime_ns"],
+            }
+        return snapshot
+
+    def _count_changed_files(self, inventory, last_snapshot):
+        current = self._build_inventory_snapshot(inventory)
+        previous = last_snapshot or {}
+        changed = 0
+        keys = set(current) | set(previous)
+        for key in keys:
+            if current.get(key) != previous.get(key):
+                changed += 1
+        return changed
+
+    def _build_project_payload(self):
+        name = os.path.basename(self.mod_path.get().rstrip("\\/")) if self.mod_path.get() else "project"
+        payload = {
+            "project_name": name,
+            "mod_path": self.mod_path.get(),
+            "preview_path": self.preview_path.get(),
+            "title": self.title_var.get(),
+            "description": self._get_desc_text_value(),
+            "visibility": self._normalize_visibility_value(self.visibility_var.get()),
+            "item_id": self.item_id_var.get(),
+            "change_note": self.note_var.get(),
+            "tags": self.tags_var.get(),
+            "manage_identity": self.manage_identity_var.get(),
+        }
+        if self.current_project_profile_path:
+            payload["profile_path"] = self.current_project_profile_path
+        if self.current_project_data.get("last_upload_signature"):
+            payload["last_upload_signature"] = self.current_project_data.get("last_upload_signature")
+        if self.current_project_data.get("last_upload_inventory"):
+            payload["last_upload_inventory"] = self.current_project_data.get("last_upload_inventory")
+        if self.current_project_data.get("last_upload_at"):
+            payload["last_upload_at"] = self.current_project_data.get("last_upload_at")
+        if self.current_project_data.get("last_uploaded_item_id"):
+            payload["last_uploaded_item_id"] = self.current_project_data.get("last_uploaded_item_id")
+        return payload
+
+    def save_current_project_state(self, quiet=False):
+        mod_path = self.mod_path.get().strip()
+        if not mod_path:
+            if not quiet:
+                messagebox.showinfo("Project", "Select a content folder before saving project state.")
+            return None
+
+        payload = self._build_project_payload()
+        try:
+            profile_path = self.project_store.save_project(payload)
+        except Exception as e:
+            if not quiet:
+                messagebox.showerror("Error", f"Failed to save project state: {e}")
+            return None
+
+        self.current_project_profile_path = profile_path
+        self.current_project_data = dict(payload, profile_path=profile_path)
+        self.project_name_var.set(payload["project_name"].upper())
+        self.project_hint_var.set(os.path.abspath(mod_path))
+        self.refresh_recent_projects()
+        if not quiet:
+            self.log(f"Saved project state: {os.path.basename(profile_path)}")
+        return profile_path
+
+    def refresh_recent_projects(self):
+        if not hasattr(self, "project_tree"):
+            return
+
+        filter_text = self.project_filter_var.get().strip().lower()
+        self.project_tree.delete(*self.project_tree.get_children())
+        for project in self.project_store.list_projects():
+            project_name = project.get("project_name") or os.path.basename(project.get("mod_path", "")) or "(unnamed)"
+            search_blob = " ".join([
+                project_name,
+                project.get("title", ""),
+                project.get("mod_path", ""),
+                project.get("item_id", ""),
+            ]).lower()
+            if filter_text and filter_text not in search_blob:
+                continue
+            updated = project.get("last_opened", "")
+            if "T" in updated:
+                updated = updated.split("T", 1)[0]
+            item_id = project.get("item_id", "0") or "0"
+            self.project_tree.insert("", "end", values=(project_name, item_id, updated), tags=(project.get("profile_path", ""),))
+
+    def _load_project_from_path(self, profile_path):
+        data = self.project_store.load_project(profile_path)
+        self.current_project_profile_path = profile_path
+        self.current_project_data = data
+        self.mod_path.set(data.get("mod_path", ""))
+        self.preview_path.set(data.get("preview_path", ""))
+        self.title_var.set(data.get("title", ""))
+        self._set_desc_text_value(data.get("description", ""))
+        self.visibility_var.set(self._normalize_visibility_value(data.get("visibility", "0 (Public)")))
+        self.item_id_var.set(data.get("item_id", "0"))
+        self.note_var.set(data.get("change_note", ""))
+        self.tags_var.set(data.get("tags", ""))
+        self.manage_identity_var.set(data.get("manage_identity", self.manage_identity_var.get()))
+        self.project_name_var.set((data.get("project_name") or os.path.basename(data.get("mod_path", "")) or "NO PROJECT").upper())
+        mod_path = data.get("mod_path", "")
+        self.project_hint_var.set(os.path.abspath(mod_path) if mod_path else "Saved project loaded.")
+        self._update_project_status(self.current_inventory)
+        self.refresh_recent_projects()
+        return data
+
+    def open_selected_project(self):
+        if not hasattr(self, "project_tree"):
+            return False
+        selected = self.project_tree.selection()
+        if not selected:
+            messagebox.showinfo("Project", "Select a saved project first.")
+            return False
+
+        tags = self.project_tree.item(selected[0]).get("tags", [])
+        if not tags:
+            return False
+        self._load_project_from_path(tags[0])
+        self.refresh_current_project_readiness()
+        self.log(f"Loaded project: {os.path.basename(tags[0])}")
+        return True
+
+    def _handle_new_project_created(self, project_path):
+        self.mod_path.set(project_path)
+        self.refresh_current_project_readiness()
+        self.save_current_project_state(quiet=True)
+
+    def _on_mod_path_changed(self, *args):
+        mod_path = self.mod_path.get().strip()
+        if not hasattr(self, "project_name_var"):
+            return
+        if not mod_path:
+            self.project_name_var.set("NO PROJECT")
+            self.project_hint_var.set("Select a mod folder to begin.")
+            return
+
+        matched = self.project_store.find_by_mod_path(mod_path)
+        if matched and matched.get("profile_path") != self.current_project_profile_path:
+            self._load_project_from_path(matched["profile_path"])
+            return
+
+        project_name = os.path.basename(mod_path.rstrip("\\/")) or "project"
+        self.project_name_var.set(project_name.upper())
+        self.project_hint_var.set(os.path.abspath(mod_path))
+        self.current_project_profile_path = self.current_project_profile_path or self.project_store._profile_path_for_mod(mod_path)
+        if hasattr(self, "readiness_tree"):
+            self.refresh_current_project_readiness()
+
+    def _build_readiness_rows(self, findings):
+        rows = []
+        if not findings:
+            return rows
+
+        for path, issue_type, detail, line in findings["issues"]:
+            rows.append(("Fixable" if issue_type == "Missing Fields" else "Warning", issue_type, f"{os.path.basename(path)}:{line} {detail}"))
+        for detail in findings["validation_errors"]:
+            rows.append(("Blocking", "Validation", detail))
+        for detail in findings["validation_warnings"]:
+            rows.append(("Warning", "Validation", detail))
+        for path in findings["trn_duplicate_headers"]:
+            rows.append(("Fixable", "TRN Duplicate", os.path.basename(path)))
+        for path in findings["trn_line_endings"]:
+            rows.append(("Fixable", "TRN Line Endings", os.path.basename(path)))
+        for path in findings["legacy_files"]:
+            rows.append(("Fixable", "Legacy File", os.path.basename(path)))
+        if not rows:
+            rows.append(("Ready", "Scan", "No blocking issues detected."))
+        return rows
+
+    def _summarize_readiness(self, findings):
+        rows = self._build_readiness_rows(findings)
+        counts = {"Blocking": 0, "Fixable": 0, "Warning": 0, "Ready": 0}
+        for severity, _issue_type, _detail in rows:
+            counts[severity] = counts.get(severity, 0) + 1
+        summary = f"Readiness: {counts['Blocking']} blocking, {counts['Fixable']} fixable, {counts['Warning']} warnings"
+        detail = "Ready to publish." if rows and rows[0][0] == "Ready" else "Resolve blocking items or use one-click fixes before publishing."
+        return summary, detail, rows
+
+    def _update_project_status(self, inventory=None):
+        project = self.current_project_data or {}
+        item_id = self.item_id_var.get().strip()
+        if item_id.isdigit() and item_id != "0":
+            self.publish_target_var.set(f"TARGET: UPDATE ITEM {item_id}")
+        else:
+            self.publish_target_var.set("TARGET: CREATE NEW ITEM")
+
+        last_upload_at = project.get("last_upload_at")
+        if last_upload_at:
+            date_text = last_upload_at.replace("T", " ").split(".", 1)[0]
+            self.last_upload_var.set(f"LAST PUBLISH: {date_text}")
+        else:
+            self.last_upload_var.set("LAST PUBLISH: NONE")
+
+        if inventory is not None:
+            changed = self._count_changed_files(inventory, project.get("last_upload_inventory"))
+            self.changed_since_upload_var.set(f"CHANGED FILES: {changed}")
+        else:
+            self.changed_since_upload_var.set("CHANGED FILES: UNKNOWN")
+
+    def refresh_current_project_readiness(self):
+        mod_dir = self.mod_path.get().strip()
+        if not hasattr(self, "readiness_tree"):
+            return None
+        self.readiness_tree.delete(*self.readiness_tree.get_children())
+        if not mod_dir or not os.path.exists(mod_dir):
+            self.current_inventory = []
+            self.current_findings = None
+            self.current_readiness = None
+            self.readiness_summary_var.set("Readiness: Select a content folder.")
+            self.readiness_detail_var.set("")
+            self._update_project_status([])
+            return None
+
+        inventory = self._build_mod_inventory(mod_dir)
+        findings = self._collect_mod_findings(mod_dir, inventory=inventory)
+        self.current_inventory = inventory
+        self.current_findings = findings
+        self.current_project_signature = self._fingerprint_inventory(inventory)
+        summary, detail, rows = self._summarize_readiness(findings)
+        self.current_readiness = rows
+        self.readiness_summary_var.set(summary)
+        self.readiness_detail_var.set(detail)
+        for severity, issue_type, text in rows:
+            self.readiness_tree.insert("", "end", values=(severity, issue_type, text))
+        self._update_project_status(inventory)
+        return findings
+
+    def _build_publish_plan(self, content, preview, use_cached_creds, findings, inventory):
+        auth_mode = "Cached credentials" if use_cached_creds else f"Manual login ({self.username_var.get().strip()})"
+        item_id = self.item_id_var.get().strip()
+        mode = f"UPDATE ({item_id})" if item_id.isdigit() and item_id != "0" else "CREATE NEW"
+        blockers = list(findings["validation_errors"])
+        warnings = list(findings["validation_warnings"])
+        warnings.extend(
+            [f"{len(findings['issues'])} scanner issues found."] if findings["issues"] else []
+        )
+        fixups = []
+        if findings["issues"]:
+            fixups.append(("scanner", "Apply available scanner quick fixes"))
+        if findings["trn_duplicate_headers"]:
+            fixups.append(("trn_duplicates", f"Remove duplicate [Size] headers in {len(findings['trn_duplicate_headers'])} TRN files"))
+        if findings["trn_line_endings"]:
+            fixups.append(("trn_endings", f"Normalize CRLF line endings in {len(findings['trn_line_endings'])} TRN files"))
+        if findings["legacy_files"]:
+            fixups.append(("legacy_files", f"Delete {len(findings['legacy_files'])} legacy .map files"))
+
+        changed = self._count_changed_files(inventory, self.current_project_data.get("last_upload_inventory"))
+        return {
+            "mode": mode,
+            "item_id": item_id or "0",
+            "auth_mode": auth_mode,
+            "content": os.path.abspath(content),
+            "preview": os.path.abspath(preview),
+            "title": self.title_var.get(),
+            "visibility": self._normalize_visibility_value(self.visibility_var.get()),
+            "change_note": self.note_var.get().strip(),
+            "changed_files": changed,
+            "blockers": blockers,
+            "warnings": warnings,
+            "fixups": fixups,
+        }
+
+    def _apply_publish_fixups(self, findings, selected_fixup_keys):
+        if "scanner" in selected_fixup_keys and findings["issues"]:
+            self.apply_quick_fixes(findings["issues"])
+        if "trn_duplicates" in selected_fixup_keys and findings["trn_duplicate_headers"]:
+            self.fix_trn_duplicates(findings["trn_duplicate_headers"])
+        if "trn_endings" in selected_fixup_keys and findings["trn_line_endings"]:
+            self.fix_trn_files(findings["trn_line_endings"])
+        if "legacy_files" in selected_fixup_keys and findings["legacy_files"]:
+            self.delete_legacy_files(findings["legacy_files"])
+        return self.refresh_current_project_readiness()
+
+    def _confirm_publish_review(self, plan, findings):
+        wait_window = getattr(self.root, "wait_window", None)
+        if wait_window is None or type(wait_window).__name__ == "MagicMock":
+            return True, [key for key, _label in plan["fixups"]]
+
+        if not plan["fixups"] and not plan["warnings"] and not plan["blockers"]:
+            return True, []
+
+        win = tk.Toplevel(self.root)
+        win.title("Review Publish Plan")
+        win.geometry("860x620")
+        win.configure(bg="#1a1a1a")
+        ttk.Label(win, text="REVIEW AND PUBLISH", font=(self.current_font, 14, "bold"), foreground=self.colors["highlight"], background="#1a1a1a").pack(anchor="w", padx=12, pady=(12, 6))
+
+        summary = tk.Text(win, height=10, bg="#050505", fg="#d4d4d4", insertbackground="#d4d4d4", font=("Consolas", 10))
+        summary.pack(fill="x", padx=12, pady=(0, 10))
+        lines = [
+            f"Mode: {plan['mode']}",
+            f"Title: {plan['title']}",
+            f"Visibility: {plan['visibility']}",
+            f"Content: {plan['content']}",
+            f"Preview: {plan['preview']}",
+            f"Auth: {plan['auth_mode']}",
+            f"Changed files since last publish: {plan['changed_files']}",
+            f"Change note: {plan['change_note'] or '(empty)'}",
+            "",
+            f"Blocking: {len(plan['blockers'])}",
+            f"Fixable: {len(plan['fixups'])}",
+            f"Warnings: {len(plan['warnings'])}",
+        ]
+        summary.insert("1.0", "\n".join(lines))
+        summary.config(state="disabled")
+
+        body = ttk.Frame(win)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+
+        left = ttk.LabelFrame(body, text=" FIXES ", padding=10)
+        left.pack(side="left", fill="y", padx=(0, 10))
+        selected_fixups = {}
+        for key, label in plan["fixups"]:
+            var = tk.BooleanVar(value=True)
+            selected_fixups[key] = var
+            ttk.Checkbutton(left, text=label, variable=var).pack(anchor="w")
+        if not selected_fixups:
+            ttk.Label(left, text="No one-click fixes available.").pack(anchor="w")
+
+        right = ttk.LabelFrame(body, text=" FINDINGS ", padding=10)
+        right.pack(side="left", fill="both", expand=True)
+        findings_tree = ttk.Treeview(right, columns=("Severity", "Detail"), show="headings")
+        findings_tree.heading("Severity", text="Severity")
+        findings_tree.heading("Detail", text="Detail")
+        findings_tree.column("Severity", width=90, anchor="center")
+        findings_tree.column("Detail", width=520)
+        findings_tree.pack(fill="both", expand=True)
+
+        for blocker in plan["blockers"]:
+            findings_tree.insert("", "end", values=("Blocking", blocker))
+        for warning in plan["warnings"]:
+            findings_tree.insert("", "end", values=("Warning", warning))
+        for severity, issue_type, detail in self._build_readiness_rows(findings):
+            if severity in ("Ready",):
+                continue
+            findings_tree.insert("", "end", values=(severity, f"{issue_type}: {detail}"))
+
+        result = {"publish": False, "fixups": []}
+
+        def publish():
+            result["publish"] = True
+            result["fixups"] = [key for key, var in selected_fixups.items() if var.get()]
+            win.destroy()
+
+        btns = ttk.Frame(win)
+        btns.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Button(btns, text="CANCEL", command=win.destroy).pack(side="right")
+        if plan["blockers"]:
+            ttk.Button(btns, text="PUBLISH ANYWAY", command=publish).pack(side="right", padx=6)
+        else:
+            ttk.Button(btns, text="PUBLISH", command=publish, style="Success.TButton").pack(side="right", padx=6)
+
+        win.transient(self.root)
+        win.grab_set()
+        self.root.wait_window(win)
+        return result["publish"], result["fixups"]
 
     def _get_mod_scanner(self):
         self.mod_scanner.resource_dir = self.resource_dir
@@ -457,8 +871,9 @@ class WorkshopUploader:
         style.theme_use('default')
         
         c = self.colors
-        main_font = (self.current_font, 10)
-        bold_font = (self.current_font, 11, "bold")
+        main_font = ("Consolas", 10)
+        bold_font = ("Consolas", 10, "bold")
+        display_font = (self.current_font, 11, "bold")
         
         style.configure(".", background=c["bg"], foreground=c["fg"], font=main_font, bordercolor=c["dark_highlight"])
         style.configure("TFrame", background=c["bg"])
@@ -466,7 +881,7 @@ class WorkshopUploader:
         style.configure("TNotebook.Tab", background="#1a1a1a", foreground=c["fg"], padding=[10, 2])
         style.map("TNotebook.Tab", background=[("selected", c["dark_highlight"])], foreground=[("selected", c["highlight"])])
         style.configure("TLabelframe", background=c["bg"], bordercolor=c["highlight"])
-        style.configure("TLabelframe.Label", background=c["bg"], foreground=c["highlight"], font=bold_font)
+        style.configure("TLabelframe.Label", background=c["bg"], foreground=c["highlight"], font=display_font)
         style.configure("TLabel", background=c["bg"], foreground=c["fg"])
         style.configure("TEntry", fieldbackground="#1a1a1a", foreground=c["accent"], insertcolor=c["highlight"])
         style.configure("TButton", background="#1a1a1a", foreground=c["fg"])
@@ -478,242 +893,282 @@ class WorkshopUploader:
         style.map("Treeview", background=[("selected", c["accent"])], foreground=[("selected", "#000000")])
 
     def setup_ui(self):
-        # Main Container
-        main_frame = ttk.Frame(self.root, padding=20)
+        main_frame = ttk.Frame(self.root, padding=16)
         main_frame.pack(fill="both", expand=True)
 
-        # --- TABS ---
-        self.notebook = ttk.Notebook(main_frame)
-        self.notebook.pack(fill="both", expand=True, pady=10)
+        header = ttk.Frame(main_frame)
+        header.pack(fill="x", pady=(0, 12))
 
-        self.upload_tab = ttk.Frame(self.notebook)
-        self.manage_tab = ttk.Frame(self.notebook)
+        ttk.Label(
+            header,
+            text="WORKSHOP COMMAND",
+            font=(self.current_font, 20, "bold"),
+            foreground=self.colors["highlight"],
+        ).pack(side="left")
 
-        self.notebook.add(self.upload_tab, text=" UPLOAD ")
-        self.notebook.add(self.manage_tab, text=" MANAGE ")
+        header_meta = ttk.Frame(header)
+        header_meta.pack(side="right")
+        ttk.Label(header_meta, textvariable=self.publish_target_var, foreground="#ffcc66").pack(anchor="e")
+        ttk.Label(header_meta, textvariable=self.last_upload_var).pack(anchor="e")
+        ttk.Label(header_meta, textvariable=self.changed_since_upload_var, foreground="#ffff44").pack(anchor="e")
 
-        self.setup_upload_tab(self.upload_tab)
-        self.setup_manage_tab(self.manage_tab)
+        top_bar = ttk.Frame(main_frame)
+        top_bar.pack(fill="x", pady=(0, 10))
+        ttk.Label(top_bar, text="Target Game:").pack(side="left")
+        self.game_combo = ttk.Combobox(top_bar, textvariable=self.game_var, values=list(self.games.keys()), state="readonly", width=12)
+        self.game_combo.pack(side="left", padx=(8, 20))
+        ttk.Label(top_bar, textvariable=self.busy_status_var, foreground="#ffff44").pack(side="right")
+        ttk.Label(top_bar, textvariable=self.project_hint_var, foreground=self.colors["accent"]).pack(side="right", padx=(0, 20))
 
-    def setup_upload_tab(self, parent_tab):
-        
-        # --- HEADER ---
-        header = ttk.Frame(parent_tab)
-        header.pack(fill="x", pady=(0, 20))
-        ttk.Label(header, text="WORKSHOP UPLOADER", font=(self.current_font, 20, "bold"), foreground=self.colors["highlight"]).pack(side="left")
-        
-        # Game Selector
-        self.game_combo = ttk.Combobox(header, textvariable=self.game_var, values=list(self.games.keys()), state="readonly", width=10)
-        self.game_combo.pack(side="right")
-        ttk.Label(header, text="Target Game:").pack(side="right", padx=10)
+        body = ttk.Frame(main_frame)
+        body.pack(fill="both", expand=True)
+        body.columnconfigure(0, weight=2)
+        body.columnconfigure(1, weight=5)
+        body.columnconfigure(2, weight=4)
+        body.rowconfigure(0, weight=1)
 
-        # --- CONFIGURATION ---
-        cfg_frame = ttk.LabelFrame(parent_tab, text=" SYSTEM CONFIG ", padding=10)
-        cfg_frame.pack(fill="x", pady=5)
-        
-        # SteamCMD Path
-        ttk.Label(cfg_frame, text="SteamCMD Path:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(cfg_frame, textvariable=self.steamcmd_path).grid(row=0, column=1, sticky="ew", padx=5)
-        ttk.Button(cfg_frame, text="BROWSE", command=self.browse_steamcmd).grid(row=0, column=2)
-        ttk.Button(cfg_frame, text="AUTO-DOWNLOAD", command=self.download_steamcmd).grid(row=0, column=3, padx=5)
-        
-        # Credentials
-        ttk.Label(cfg_frame, text="Steam Username:").grid(row=1, column=0, sticky="w", pady=5)
-        self.user_entry = ttk.Entry(cfg_frame, textvariable=self.username_var)
-        self.user_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
-        
-        ttk.Label(cfg_frame, text="Password:").grid(row=1, column=2, sticky="e", pady=5)
-        self.pwd_entry = ttk.Entry(cfg_frame, textvariable=self.password_var, show="*")
-        self.pwd_entry.grid(row=1, column=3, sticky="ew", padx=5)
-        
-        ttk.Label(cfg_frame, text="2FA Code:").grid(row=1, column=4, sticky="e", pady=5)
-        self.guard_entry = ttk.Entry(cfg_frame, textvariable=self.steam_guard_var, width=10)
-        self.guard_entry.grid(row=1, column=5, sticky="w", padx=5)
-        
-        # QR & Cached Creds
-        auth_opts = ttk.Frame(cfg_frame)
-        auth_opts.grid(row=2, column=1, columnspan=2, sticky="w", pady=5)
-        
-        self.qr_btn = ttk.Button(auth_opts, text="LOGIN WITH QR", command=self.start_qr_login)
-        self.qr_btn.pack(side="left", padx=(0, 10))
-        ToolTip(self.qr_btn, "Login without a password by scanning a QR code with your Steam Mobile App.")
-        
-        cached_cb = ttk.Checkbutton(auth_opts, text="USE CACHED CREDENTIALS", variable=self.use_cached_creds_var)
-        cached_cb.pack(side="left")
-        ToolTip(cached_cb, "If checked, SteamCMD will attempt to use existing login session.\nErrors if you are not already signed in.")
+        left_col = ttk.Frame(body)
+        left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        center_col = ttk.Frame(body)
+        center_col.grid(row=0, column=1, sticky="nsew", padx=(0, 10))
+        right_col = ttk.Frame(body)
+        right_col.grid(row=0, column=2, sticky="nsew")
 
-        native_appid_cb = ttk.Checkbutton(cfg_frame, text="EXPERIMENTAL: WRITE steam_appid.txt FOR NATIVE TAGS", variable=self.experimental_native_appid_var)
-        native_appid_cb.grid(row=2, column=3, columnspan=3, sticky="w", pady=5, padx=5)
-        ToolTip(native_appid_cb, "Writes a temporary steam_appid.txt next to the uploader while native Steamworks tag submission runs.\nUses the current game AppID and removes the file afterward when this app created it.")
+        self.setup_project_panel(left_col)
+        self.setup_library_panel(left_col)
+        self.setup_access_panel(center_col)
+        self.setup_editor_panel(center_col)
+        self.setup_readiness_panel(right_col)
+        self.setup_activity_panel(right_col)
 
-        # API Key
-        ttk.Label(cfg_frame, text="Steam Web API Key:").grid(row=3, column=0, sticky="w", pady=5)
-        ttk.Entry(cfg_frame, textvariable=self.api_key_var, show="*").grid(row=3, column=1, sticky="ew", padx=5)
-        api_help = ttk.Button(cfg_frame, text="?", command=self.open_api_key_link, width=3)
-        api_help.grid(row=3, column=2, padx=5)
-        ToolTip(api_help, "Needed for the 'Manage' tab.\nGet one from steamcommunity.com/dev/apikey")
-        
-        cfg_frame.columnconfigure(1, weight=1)
-        cfg_frame.columnconfigure(3, weight=1)
+        self.notebook = None
+        self.upload_tab = None
+        self.manage_tab = None
 
-        # --- MOD DETAILS ---
-        mod_frame = ttk.LabelFrame(parent_tab, text=" MOD DETAILS ", padding=10)
-        mod_frame.pack(fill="both", expand=True, pady=10)
-        
-        # Profile Controls
-        prof_frame = ttk.Frame(mod_frame)
-        prof_frame.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
-        ttk.Button(prof_frame, text="LOAD PROFILE", command=self.load_profile).pack(side="left")
-        ttk.Button(prof_frame, text="SAVE PROFILE", command=self.save_profile).pack(side="left", padx=5)
-        self.upload_mode_label = ttk.Label(prof_frame, text="", foreground=self.colors["highlight"], font=(self.current_font, 10, "bold"))
-        self.upload_mode_label.pack(side="right")
-        self._update_upload_mode_indicator()
-        
-        # Content Path
-        ttk.Label(mod_frame, text="Content Folder:").grid(row=1, column=0, sticky="w")
-        ttk.Entry(mod_frame, textvariable=self.mod_path).grid(row=1, column=1, sticky="ew", padx=5)
-        
-        cf_btn_frame = ttk.Frame(mod_frame)
-        cf_btn_frame.grid(row=1, column=2)
-        ttk.Button(cf_btn_frame, text="BROWSE", command=self.browse_content).pack(side="left")
-        ttk.Button(cf_btn_frame, text="ANALYZE", width=8, command=self.analyze_memory_usage).pack(side="left", padx=2)
-        ttk.Button(cf_btn_frame, text="NEW...", width=6, command=self.open_template_wizard).pack(side="left")
-        
-        watch_cb = ttk.Checkbutton(cf_btn_frame, text="WATCH", variable=self.watch_mode_var, command=self.toggle_watch_mode)
-        watch_cb.pack(side="left", padx=5)
-        ToolTip(watch_cb, "Live monitoring of the content folder.\nAutomatically scans for errors when files change.")
-        
-        # Preview Image
-        ttk.Label(mod_frame, text="Preview Image:").grid(row=2, column=0, sticky="w", pady=5)
-        ttk.Entry(mod_frame, textvariable=self.preview_path).grid(row=2, column=1, sticky="ew", padx=5, pady=5)
-        ttk.Button(mod_frame, text="BROWSE", command=self.browse_preview).grid(row=2, column=2, pady=5)
-        
-        # Title
-        ttk.Label(mod_frame, text="Title:").grid(row=3, column=0, sticky="w")
-        ttk.Entry(mod_frame, textvariable=self.title_var).grid(row=3, column=1, columnspan=2, sticky="ew", padx=5)
-        
-        self.title_char_label = ttk.Label(mod_frame, text=f"0 / {STEAM_TITLE_LIMIT}")
-        self.title_char_label.grid(row=3, column=3, sticky="w", padx=5)
-        
-        # Description
-        ttk.Label(mod_frame, text="Description:").grid(row=4, column=0, sticky="nw", pady=5)
-        self.desc_text = tk.Text(mod_frame, height=5, bg="#1a1a1a", fg=self.colors["accent"], insertbackground=self.colors["highlight"], font=("Consolas", 10))
-        self.desc_text.grid(row=4, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
-        self.desc_text.bind("<KeyRelease>", self._update_desc_counter)
-        
-        self.desc_char_label = ttk.Label(mod_frame, text=f"0 / {STEAM_DESC_LIMIT}")
-        self.desc_char_label.grid(row=4, column=3, sticky="nw", pady=5, padx=5)
-        
-        # Metadata Row
-        meta_row = ttk.Frame(mod_frame)
-        meta_row.grid(row=5, column=0, columnspan=3, sticky="ew", pady=5)
-        
-        ttk.Label(meta_row, text="Visibility:").pack(side="left")
-        ttk.Combobox(meta_row, textvariable=self.visibility_var, values=["0 (Public)", "1 (Friends)", "2 (Private)"], state="readonly", width=15).pack(side="left", padx=5)
-        
-        ttk.Label(meta_row, text="Workshop ID (0=New):").pack(side="left", padx=(20, 5))
-        ttk.Entry(meta_row, textvariable=self.item_id_var, width=15).pack(side="left", padx=5)
-        reset_btn = ttk.Button(meta_row, text="CREATE NEW ITEM", command=self.set_create_mode)
-        reset_btn.pack(side="left", padx=(2, 6))
-        ToolTip(reset_btn, "Switches the uploader to create a new Workshop item (Workshop ID = 0).")
-        
-        link_btn = ttk.Button(meta_row, text="↗", width=3, command=self.open_workshop_page)
-        link_btn.pack(side="left", padx=2)
-        ToolTip(link_btn, "Open Workshop Page")
-        
-        ttk.Label(meta_row, text="Change Note:").pack(side="left", padx=(20, 5))
-        ttk.Entry(meta_row, textvariable=self.note_var).pack(side="left", fill="x", expand=True, padx=5)
-        
-        # Tags Row (New)
-        tags_row = ttk.Frame(mod_frame)
-        tags_row.grid(row=6, column=0, columnspan=3, sticky="ew", pady=5)
-        ttk.Label(tags_row, text="Tags (comma separated) [EXPERIMENTAL]:").pack(side="left")
-        ttk.Entry(tags_row, textvariable=self.tags_var).pack(side="left", fill="x", expand=True, padx=5)
-        ToolTip(tags_row, "EXPERIMENTAL: Uses Web API to update tags post-upload.\nCommon API keys may lack permissions.\nExamples: Map, Vehicle, Building, Weapon")
-        
-        mod_frame.columnconfigure(1, weight=1)
+    def setup_project_panel(self, parent):
+        frame = ttk.LabelFrame(parent, text=" PROJECTS ", padding=10)
+        frame.pack(fill="both", expand=True, pady=(0, 10))
 
-        # --- ACTIONS ---
-        btn_frame = ttk.Frame(parent_tab)
-        btn_frame.pack(fill="x", pady=10)
-        
-        self.log_box = tk.Text(parent_tab, height=8, state="disabled", bg="#050505", fg=self.colors["fg"], font=("Consolas", 9))
-        self.log_box.pack(fill="x", pady=(0, 10))
-        
-        self.upload_btn = ttk.Button(btn_frame, text="UPLOAD TO STEAM WORKSHOP", command=self.start_upload, style="Success.TButton")
-        self.upload_btn.pack(side="left", fill="x", expand=True, ipady=5)
-        self.logs_btn = ttk.Button(btn_frame, text="LOGS", width=10, command=self.show_steam_logs)
-        self.logs_btn.pack(side="right", fill="y", padx=(5,0))
-        self.busy_status_label = ttk.Label(btn_frame, textvariable=self.busy_status_var, foreground="#ffff44")
-        self.busy_status_label.pack(side="right", padx=(0, 10))
+        ttk.Label(frame, textvariable=self.project_name_var, font=(self.current_font, 12, "bold"), foreground=self.colors["highlight"]).pack(anchor="w")
+        ttk.Label(frame, text="Saved local projects paired to Workshop items when available.", foreground=self.colors["fg"]).pack(anchor="w", pady=(2, 8))
 
-    def setup_manage_tab(self, parent_tab):
-        # --- CONTROLS ---
-        ctrl_frame = ttk.Frame(parent_tab, padding=10)
-        ctrl_frame.pack(fill="x")
+        filter_row = ttk.Frame(frame)
+        filter_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(filter_row, text="Filter:").pack(side="left")
+        filter_entry = ttk.Entry(filter_row, textvariable=self.project_filter_var)
+        filter_entry.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        filter_entry.bind("<KeyRelease>", lambda _e: self.refresh_recent_projects())
 
-        self.refresh_btn = ttk.Button(ctrl_frame, text="Refresh List", command=self.refresh_workshop_items)
+        tree_frame = ttk.Frame(frame)
+        tree_frame.pack(fill="both", expand=True)
+        self.project_tree = ttk.Treeview(tree_frame, columns=("Name", "Item", "Updated"), show="headings", height=10)
+        self.project_tree.heading("Name", text="Project")
+        self.project_tree.heading("Item", text="Workshop ID")
+        self.project_tree.heading("Updated", text="Last Opened")
+        self.project_tree.column("Name", width=180)
+        self.project_tree.column("Item", width=90, anchor="center")
+        self.project_tree.column("Updated", width=120, anchor="center")
+        prj_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.project_tree.yview)
+        self.project_tree.configure(yscrollcommand=prj_scroll.set)
+        self.project_tree.pack(side="left", fill="both", expand=True)
+        prj_scroll.pack(side="right", fill="y")
+        self.project_tree.bind("<Double-1>", lambda _e: self.open_selected_project())
+
+        btn_row = ttk.Frame(frame)
+        btn_row.pack(fill="x", pady=(8, 0))
+        ttk.Button(btn_row, text="OPEN", command=self.open_selected_project).pack(side="left")
+        ttk.Button(btn_row, text="SAVE", command=self.save_current_project_state).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="EXPORT", command=self.save_profile).pack(side="right")
+        ttk.Button(btn_row, text="IMPORT", command=self.load_profile).pack(side="right", padx=4)
+
+    def setup_library_panel(self, parent):
+        frame = ttk.LabelFrame(parent, text=" WORKSHOP LIBRARY ", padding=10)
+        frame.pack(fill="both", expand=True)
+
+        ctrl_row = ttk.Frame(frame)
+        ctrl_row.pack(fill="x", pady=(0, 6))
+        self.refresh_btn = ttk.Button(ctrl_row, text="REFRESH", command=self.refresh_workshop_items)
         self.refresh_btn.pack(side="left")
-        self.manage_set_target_btn = ttk.Button(ctrl_frame, text="Use Selected ID in Upload", command=self.use_selected_item_id_for_upload)
-        self.manage_set_target_btn.pack(side="left", padx=(10, 0))
-        ToolTip(self.manage_set_target_btn, "Copies the selected Workshop ID into the Upload tab and switches to update mode.")
-        
-        self.manage_update_btn = ttk.Button(ctrl_frame, text="Prepare for Update", command=self.prepare_update)
-        self.manage_update_btn.pack(side="left", padx=10)
-        ToolTip(self.manage_update_btn, "Populates the Upload tab with the selected item's data.\nYou will then need to select the content folder and click Upload.")
-        
-        info_label = ttk.Label(ctrl_frame, text="Requires API Key.", foreground="#ffff44")
-        info_label.pack(side="right")
+        self.manage_set_target_btn = ttk.Button(ctrl_row, text="PAIR", command=self.use_selected_item_id_for_upload)
+        self.manage_set_target_btn.pack(side="left", padx=4)
+        self.manage_update_btn = ttk.Button(ctrl_row, text="LOAD DETAILS", command=self.prepare_update)
+        self.manage_update_btn.pack(side="left")
 
-        identity_frame = ttk.Frame(parent_tab, padding=(10, 0, 10, 10))
-        identity_frame.pack(fill="x")
-
-        ttk.Label(identity_frame, text="Workshop Owner (SteamID64 / Profile URL / Vanity):").pack(side="left")
-        self.manage_owner_entry = ttk.Entry(identity_frame, textvariable=self.manage_identity_var)
-        self.manage_owner_entry.pack(side="left", fill="x", expand=True, padx=5)
-        self.manage_detect_btn = ttk.Button(identity_frame, text="USE CURRENT STEAM LOGIN", command=self.use_local_steam_identity)
+        identity_row = ttk.Frame(frame)
+        identity_row.pack(fill="x", pady=(0, 6))
+        ttk.Label(identity_row, text="Owner:").pack(side="left")
+        self.manage_owner_entry = ttk.Entry(identity_row, textvariable=self.manage_identity_var)
+        self.manage_owner_entry.pack(side="left", fill="x", expand=True, padx=6)
+        self.manage_detect_btn = ttk.Button(identity_row, text="USE CURRENT LOGIN", command=self.use_local_steam_identity)
         self.manage_detect_btn.pack(side="left")
-        ToolTip(self.manage_detect_btn, "Auto-detects your most recent Steam account and fills the owner as SteamID64.")
 
-        # --- TREEVIEW ---
-        tree_frame = ttk.Frame(parent_tab)
-        tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
+        ttk.Label(frame, textvariable=self.library_status_var, foreground="#ffff44").pack(anchor="w", pady=(0, 6))
 
-        self.tree = ttk.Treeview(tree_frame, columns=("Title", "ID", "Visibility", "Updated"), show="headings")
+        tree_frame = ttk.Frame(frame)
+        tree_frame.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(tree_frame, columns=("Title", "ID", "Visibility", "Updated"), show="headings", height=10)
         self.tree.heading("Title", text="Title")
         self.tree.heading("ID", text="Workshop ID")
         self.tree.heading("Visibility", text="Visibility")
-        self.tree.heading("Updated", text="Last Updated")
-
-        self.tree.column("Title", width=400)
-        self.tree.column("ID", width=150, anchor="center")
-        self.tree.column("Visibility", width=100, anchor="center")
-        self.tree.column("Updated", width=150, anchor="center")
-
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-
+        self.tree.heading("Updated", text="Updated")
+        self.tree.column("Title", width=220)
+        self.tree.column("ID", width=110, anchor="center")
+        self.tree.column("Visibility", width=90, anchor="center")
+        self.tree.column("Updated", width=120, anchor="center")
+        lib_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=lib_scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-
+        lib_scroll.pack(side="right", fill="y")
         self.tree.bind("<<TreeviewSelect>>", self._on_manage_selection)
-        self.tree.bind("<Double-1>", lambda e: self.prepare_update())
+        self.tree.bind("<Double-1>", lambda _e: self.prepare_update())
+
+    def setup_access_panel(self, parent):
+        frame = ttk.LabelFrame(parent, text=" ACCESS ", padding=10)
+        frame.pack(fill="x", pady=(0, 10))
+        frame.columnconfigure(1, weight=3)
+        frame.columnconfigure(3, weight=2)
+
+        ttk.Label(frame, text="SteamCMD Path:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.steamcmd_path).grid(row=0, column=1, sticky="ew", padx=5)
+        path_actions = ttk.Frame(frame)
+        path_actions.grid(row=0, column=2, columnspan=2, sticky="e")
+        ttk.Button(path_actions, text="BROWSE", command=self.browse_steamcmd).pack(side="left")
+        ttk.Button(path_actions, text="AUTO-DL", command=self.download_steamcmd).pack(side="left", padx=(5, 0))
+
+        ttk.Label(frame, text="Steam Username:").grid(row=1, column=0, sticky="w", pady=5)
+        self.user_entry = ttk.Entry(frame, textvariable=self.username_var)
+        self.user_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+
+        ttk.Label(frame, text="Password:").grid(row=1, column=2, sticky="e", pady=5)
+        self.pwd_entry = ttk.Entry(frame, textvariable=self.password_var, show="*")
+        self.pwd_entry.grid(row=1, column=3, sticky="ew", padx=(5, 0), pady=5)
+
+        ttk.Label(frame, text="2FA Code:").grid(row=2, column=0, sticky="w")
+        self.guard_entry = ttk.Entry(frame, textvariable=self.steam_guard_var, width=12)
+        self.guard_entry.grid(row=2, column=1, sticky="w", padx=5)
+
+        auth_row = ttk.Frame(frame)
+        auth_row.grid(row=2, column=2, columnspan=2, sticky="w")
+        self.qr_btn = ttk.Button(auth_row, text="LOGIN WITH QR", command=self.start_qr_login)
+        self.qr_btn.pack(side="left")
+        cached_cb = ttk.Checkbutton(auth_row, text="USE CACHED LOGIN", variable=self.use_cached_creds_var)
+        cached_cb.pack(side="left", padx=10)
+
+        ttk.Label(frame, text="Steam Web API Key:").grid(row=3, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(frame, textvariable=self.api_key_var, show="*").grid(row=3, column=1, sticky="ew", padx=5, pady=(5, 0))
+        ttk.Button(frame, text="?", command=self.open_api_key_link, width=3).grid(row=3, column=2, sticky="w", padx=(0, 5), pady=(5, 0))
+        native_appid_cb = ttk.Checkbutton(frame, text="NATIVE TAGS VIA steam_appid.txt", variable=self.experimental_native_appid_var)
+        native_appid_cb.grid(row=4, column=1, columnspan=3, sticky="w", pady=(5, 0))
+
+    def setup_editor_panel(self, parent):
+        frame = ttk.LabelFrame(parent, text=" PROJECT WORKSPACE ", padding=10)
+        frame.pack(fill="both", expand=True)
+        frame.columnconfigure(1, weight=3)
+        frame.columnconfigure(3, weight=2)
+
+        top_row = ttk.Frame(frame)
+        top_row.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+        self.upload_mode_label = ttk.Label(top_row, text="", foreground=self.colors["highlight"], font=(self.current_font, 11, "bold"))
+        self.upload_mode_label.pack(side="left")
+        ttk.Button(top_row, text="NEW TARGET", command=self.set_create_mode).pack(side="right")
+        ttk.Button(top_row, text="OPEN PAGE", command=self.open_workshop_page).pack(side="right", padx=4)
+
+        ttk.Label(frame, text="Content Folder:").grid(row=1, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.mod_path).grid(row=1, column=1, columnspan=3, sticky="ew", padx=5)
+        path_btns = ttk.Frame(frame)
+        path_btns.grid(row=2, column=1, columnspan=3, sticky="w", pady=(4, 8))
+        ttk.Button(path_btns, text="BROWSE", command=self.browse_content).pack(side="left")
+        ttk.Button(path_btns, text="NEW", command=self.open_template_wizard).pack(side="left", padx=4)
+        ttk.Button(path_btns, text="ANALYZE", command=self.analyze_memory_usage).pack(side="left")
+        ttk.Button(path_btns, text="RESCAN", command=self.refresh_current_project_readiness).pack(side="left", padx=4)
+
+        watch_row = ttk.Frame(frame)
+        watch_row.grid(row=3, column=1, columnspan=3, sticky="w", pady=(0, 8))
+        watch_cb = ttk.Checkbutton(watch_row, text="WATCH FOR CHANGES", variable=self.watch_mode_var, command=self.toggle_watch_mode)
+        watch_cb.pack(side="left")
+
+        ttk.Label(frame, text="Preview Image:").grid(row=4, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.preview_path).grid(row=4, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+        ttk.Button(frame, text="BROWSE", command=self.browse_preview).grid(row=4, column=3, sticky="e", pady=5)
+
+        ttk.Label(frame, text="Title:").grid(row=5, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.title_var).grid(row=5, column=1, columnspan=2, sticky="ew", padx=5)
+        self.title_char_label = ttk.Label(frame, text=f"0 / {STEAM_TITLE_LIMIT}")
+        self.title_char_label.grid(row=5, column=3, sticky="w")
+
+        ttk.Label(frame, text="Description:").grid(row=6, column=0, sticky="nw", pady=5)
+        self.desc_text = tk.Text(frame, height=10, bg="#1a1a1a", fg=self.colors["accent"], insertbackground=self.colors["highlight"], font=("Consolas", 10))
+        self.desc_text.grid(row=6, column=1, columnspan=3, sticky="nsew", padx=5, pady=5)
+        self.desc_text.bind("<KeyRelease>", self._update_desc_counter)
+
+        self.desc_char_label = ttk.Label(frame, text=f"0 / {STEAM_DESC_LIMIT}")
+        self.desc_char_label.grid(row=7, column=3, sticky="e", padx=5)
+
+        ttk.Label(frame, text="Visibility:").grid(row=8, column=0, sticky="w", pady=5)
+        ttk.Combobox(frame, textvariable=self.visibility_var, values=["0 (Public)", "1 (Friends)", "2 (Private)"], state="readonly", width=16).grid(row=8, column=1, sticky="w", padx=5, pady=5)
+        ttk.Label(frame, text="Workshop ID:").grid(row=8, column=2, sticky="e")
+        ttk.Entry(frame, textvariable=self.item_id_var, width=18).grid(row=8, column=3, sticky="w", padx=5)
+
+        ttk.Label(frame, text="Change Note:").grid(row=9, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.note_var).grid(row=9, column=1, columnspan=3, sticky="ew", padx=5)
+
+        ttk.Label(frame, text="Tags:").grid(row=10, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.tags_var).grid(row=10, column=1, columnspan=3, sticky="ew", padx=5)
+
+        actions = ttk.Frame(frame)
+        actions.grid(row=11, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        self.upload_btn = ttk.Button(actions, text="REVIEW AND PUBLISH", command=self.start_upload, style="Success.TButton")
+        self.upload_btn.pack(side="left", fill="x", expand=True, ipady=6)
+        self.logs_btn = ttk.Button(actions, text="STEAM LOGS", command=self.show_steam_logs)
+        self.logs_btn.pack(side="right", padx=(6, 0))
+
+        self._update_upload_mode_indicator()
+
+    def setup_readiness_panel(self, parent):
+        frame = ttk.LabelFrame(parent, text=" READINESS ", padding=10)
+        frame.pack(fill="both", expand=True, pady=(0, 10))
+
+        ttk.Label(frame, textvariable=self.readiness_summary_var, foreground=self.colors["highlight"], font=(self.current_font, 12, "bold")).pack(anchor="w")
+        ttk.Label(frame, textvariable=self.readiness_detail_var, foreground=self.colors["fg"], justify="left").pack(anchor="w", pady=(4, 8))
+
+        tree_frame = ttk.Frame(frame)
+        tree_frame.pack(fill="both", expand=True)
+        self.readiness_tree = ttk.Treeview(tree_frame, columns=("Severity", "Type", "Detail"), show="headings")
+        self.readiness_tree.heading("Severity", text="Severity")
+        self.readiness_tree.heading("Type", text="Type")
+        self.readiness_tree.heading("Detail", text="Detail")
+        self.readiness_tree.column("Severity", width=90, anchor="center")
+        self.readiness_tree.column("Type", width=120, anchor="center")
+        self.readiness_tree.column("Detail", width=340)
+        readiness_scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.readiness_tree.yview)
+        self.readiness_tree.configure(yscrollcommand=readiness_scroll.set)
+        self.readiness_tree.pack(side="left", fill="both", expand=True)
+        readiness_scroll.pack(side="right", fill="y")
+
+    def setup_activity_panel(self, parent):
+        frame = ttk.LabelFrame(parent, text=" ACTIVITY ", padding=10)
+        frame.pack(fill="both", expand=True)
+
+        self.log_box = tk.Text(frame, height=12, state="disabled", bg="#050505", fg=self.colors["fg"], font=("Consolas", 9))
+        self.log_box.pack(fill="both", expand=True)
 
     def _update_title_counter(self, *args):
         count = len(self.title_var.get())
-        self.title_char_label.config(text=f"{count} / {STEAM_TITLE_LIMIT}")
-        if count > STEAM_TITLE_LIMIT:
-            self.title_char_label.config(foreground="red")
-        else:
-            self.title_char_label.config(foreground=self.colors["fg"])
+        if hasattr(self, "title_char_label"):
+            self.title_char_label.config(text=f"{count} / {STEAM_TITLE_LIMIT}")
+            if count > STEAM_TITLE_LIMIT:
+                self.title_char_label.config(foreground="red")
+            else:
+                self.title_char_label.config(foreground=self.colors["fg"])
 
     def _update_desc_counter(self, *args):
-        count = len(self.desc_text.get("1.0", "end-1c"))
-        self.desc_char_label.config(text=f"{count} / {STEAM_DESC_LIMIT}")
-        if count > STEAM_DESC_LIMIT:
-            self.desc_char_label.config(foreground="red")
-        else:
-            self.desc_char_label.config(foreground=self.colors["fg"])
+        count = len(self._get_desc_text_value())
+        if hasattr(self, "desc_char_label"):
+            self.desc_char_label.config(text=f"{count} / {STEAM_DESC_LIMIT}")
+            if count > STEAM_DESC_LIMIT:
+                self.desc_char_label.config(foreground="red")
+            else:
+                self.desc_char_label.config(foreground=self.colors["fg"])
 
     def _update_upload_mode_indicator(self, *args):
         item_id = self.item_id_var.get().strip()
@@ -722,6 +1177,8 @@ class WorkshopUploader:
         color = "#ffcc66" if is_update else self.colors["highlight"]
         if hasattr(self, "upload_mode_label"):
             self.upload_mode_label.config(text=text, foreground=color)
+        if hasattr(self, "publish_target_var"):
+            self.publish_target_var.set(f"TARGET: UPDATE ITEM {item_id}" if is_update else "TARGET: CREATE NEW ITEM")
 
     def set_create_mode(self):
         self.item_id_var.set("0")
@@ -803,11 +1260,12 @@ class WorkshopUploader:
             "mod_path": self.mod_path.get(),
             "preview_path": self.preview_path.get(),
             "title": self.title_var.get(),
-            "description": self.desc_text.get("1.0", "end-1c"),
-            "visibility": self.visibility_var.get(),
+            "description": self._get_desc_text_value(),
+            "visibility": self._normalize_visibility_value(self.visibility_var.get()),
             "item_id": self.item_id_var.get(),
             "change_note": self.note_var.get(),
-            "tags": self.tags_var.get()
+            "tags": self.tags_var.get(),
+            "project_name": os.path.basename(self.mod_path.get().rstrip("\\/")) if self.mod_path.get() else "project",
         }
         try:
             self._get_file_manager().save_profile(f, data)
@@ -824,12 +1282,14 @@ class WorkshopUploader:
             self.mod_path.set(data.get("mod_path", ""))
             self.preview_path.set(data.get("preview_path", ""))
             self.title_var.set(data.get("title", ""))
-            self.desc_text.delete("1.0", "end")
-            self.desc_text.insert("1.0", data.get("description", ""))
-            self.visibility_var.set(data.get("visibility", "0 (Public)"))
+            self._set_desc_text_value(data.get("description", ""))
+            self.visibility_var.set(self._normalize_visibility_value(data.get("visibility", "0 (Public)")))
             self.item_id_var.set(data.get("item_id", "0"))
             self.note_var.set(data.get("change_note", ""))
             self.tags_var.set(data.get("tags", ""))
+            self.current_project_profile_path = f if os.path.dirname(os.path.abspath(f)) == os.path.abspath(self.profiles_dir) else ""
+            self.current_project_data = data
+            self.refresh_current_project_readiness()
             self.log(f"Profile loaded: {os.path.basename(f)}")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load profile: {e}")
@@ -838,6 +1298,8 @@ class WorkshopUploader:
         self.root.after(0, lambda: self._log_impl(msg))
 
     def _log_impl(self, msg):
+        if not hasattr(self, "log_box"):
+            return
         self.log_box.config(state="normal")
         self.log_box.insert("end", f"> {msg}\n")
         self.log_box.see("end")
@@ -866,7 +1328,7 @@ class WorkshopUploader:
         threading.Thread(target=_worker, daemon=True).start()
 
     def open_template_wizard(self):
-        TemplateWizard(self.root, self.colors, on_success=lambda p: self.mod_path.set(p))
+        TemplateWizard(self.root, self.colors, on_success=self._handle_new_project_created)
 
     def toggle_watch_mode(self):
         if self.watch_mode_var.get():
@@ -892,10 +1354,13 @@ class WorkshopUploader:
 
                     if self.last_watch_signature is None:
                         self.last_watch_signature = current_signature
+                        self.root.after(0, self.refresh_current_project_readiness)
                     elif current_signature != self.last_watch_signature:
                         self.last_watch_signature = current_signature
                         self.log("Change detected! Scanning...")
                         findings = self._collect_mod_findings(mod_dir, inventory=inventory)
+                        self.current_inventory = inventory
+                        self.current_findings = findings
                         summary = (
                             len(findings["issues"]),
                             len(findings["validation_errors"]),
@@ -918,13 +1383,16 @@ class WorkshopUploader:
                                 )
                             else:
                                 self.log("Watch: Files verified.")
+                        self.root.after(0, self.refresh_current_project_readiness)
                 except Exception as e:
                     self.log(f"Watch error: {e}")
             time.sleep(3)
 
     def browse_content(self):
         d = filedialog.askdirectory()
-        if d: self.mod_path.set(d)
+        if d:
+            self.mod_path.set(d)
+            self.refresh_current_project_readiness()
 
     def browse_preview(self):
         f = filedialog.askopenfilename(filetypes=[("Images", "*.jpg;*.png;*.jpeg")])
@@ -941,7 +1409,8 @@ class WorkshopUploader:
                 if os.path.getsize(f) > 1024 * 1024:
                     if messagebox.askyesno("Image Too Large", f"Preview image is > 1MB. Auto-resize and compress it?"):
                         new_path = self.resize_preview_image(f)
-                        if new_path: self.preview_path.set(new_path)
+                        if new_path:
+                            self.preview_path.set(new_path)
             except Exception as e: self.log(f"Image size check failed: {e}")
 
     def start_qr_login(self):
@@ -1224,7 +1693,7 @@ class WorkshopUploader:
 
     def start_upload(self):
         title = self.title_var.get()
-        desc = self.desc_text.get("1.0", "end-1c")
+        desc = self._get_desc_text_value()
 
         sc = self.steamcmd_path.get()
         content = self.mod_path.get()
@@ -1250,68 +1719,27 @@ class WorkshopUploader:
 
         inventory = self._build_mod_inventory(content)
         findings = self._collect_mod_findings(content, inventory=inventory)
+        plan = self._build_publish_plan(content, preview, use_cached, findings, inventory)
 
-        # Safety Check
-        issues = findings["issues"]
-        if issues:
-            if not self.show_safety_warning(issues): return
-
-        # Content Validity Check
-        val_errors = findings["validation_errors"]
-        val_warnings = findings["validation_warnings"]
-        if val_errors:
-            messagebox.showerror("Validation Error", "Content Validation Failed:\n\n" + "\n".join(val_errors))
+        if hasattr(self, "readiness_tree"):
+            publish_ok, selected_fixups = self._confirm_publish_review(plan, findings)
+        else:
+            publish_ok = self._confirm_upload_plan(content, preview, use_cached)
+            selected_fixups = []
+        if not publish_ok:
             return
-        if val_warnings:
-            if not messagebox.askyesno("Validation Warnings", "Content Validation Warnings:\n\n" + "\n".join(val_warnings) + "\n\nContinue upload anyway?"):
-                return
 
-        # TRN Checks
-        le_issues = findings["trn_line_endings"]
-        dup_issues = findings["trn_duplicate_headers"]
-        
-        if dup_issues:
-             if messagebox.askyesno("TRN Format Warning", 
-                                   f"Found {len(dup_issues)} .trn files with duplicate [Size] headers.\n"
-                                   "This causes map loading errors.\n"
-                                   "Would you like to automatically remove the duplicates (keeping the top one)?", icon='warning'):
-                fixed_count = self.fix_trn_duplicates(dup_issues)
-                messagebox.showinfo("Fixed", f"Fixed duplicate headers in {fixed_count} files.")
-             elif not messagebox.askyesno("Confirm Upload", "Uploading with duplicate TRN headers will likely break the map.\nContinue anyway?"):
-                return
-
-        if le_issues:
-            if messagebox.askyesno("TRN Format Warning", 
-                                   f"Found {len(le_issues)} .trn files with incorrect line endings.\n"
-                                   "The game requires CRLF (Windows) line endings.\n"
-                                   "Would you like to automatically fix them?", icon='warning'):
-                fixed_count = self.fix_trn_files(le_issues)
-                messagebox.showinfo("Fixed", f"Corrected line endings in {fixed_count} files.")
-            elif not messagebox.askyesno("Confirm Upload", "Uploading with incorrect TRN line endings may cause bugs.\nContinue anyway?"):
-                return
-
-        # Legacy MAP Check
-        legacy_maps = findings["legacy_files"]
-        if legacy_maps:
-            if messagebox.askyesno("Legacy Content Warning", 
-                                   f"Found {len(legacy_maps)} .map files.\n"
-                                   "These are legacy Battlezone 1.5 texture files and are NOT used by Redux.\n"
-                                   "They will increase download size unnecessarily.\n\n"
-                                   "Would you like to automatically delete them?", icon='warning'):
-                deleted_count = self.delete_legacy_files(legacy_maps)
-                messagebox.showinfo("Cleanup Complete", f"Deleted {deleted_count} legacy files.")
-            elif not messagebox.askyesno("Confirm Upload", "Continue upload with legacy files included?"):
-                return
-
-        if not self._confirm_upload_plan(content, preview, use_cached):
-            return
+        if selected_fixups:
+            findings = self._apply_publish_fixups(findings, selected_fixups)
+            inventory = self.current_inventory or self._build_mod_inventory(content)
 
         self.save_config()
+        self.save_current_project_state(quiet=True)
         
         # Create VDF
         try:
             appid = self.games[self.game_var.get()]["appid"]
-            vis = self.visibility_var.get().split()[0]
+            vis = self._visibility_code()
             vdf_path = self._get_upload_preflight().write_upload_vdf(
                 base_dir=self.base_dir,
                 appid=appid,
@@ -1332,8 +1760,10 @@ class WorkshopUploader:
 
         # Run SteamCMD
         # We use a separate thread to not freeze UI, but we might need a new console for 2FA
+        self.pending_publish_signature = self._fingerprint_inventory(inventory)
+        self.pending_publish_inventory = self._build_inventory_snapshot(inventory)
         self._set_busy("Upload", True)
-        threading.Thread(target=self.run_steamcmd, args=(sc, user, pwd, vdf_path)).start()
+        threading.Thread(target=self.run_steamcmd, args=(sc, user, pwd, vdf_path), daemon=True).start()
 
     def run_steamcmd(self, exe, user, pwd, vdf):
         self.log("Starting SteamCMD...")
@@ -1363,12 +1793,25 @@ class WorkshopUploader:
             if p.returncode == 0:
                 self.log("SteamCMD finished successfully.")
                 updated_item_id = self.update_item_id_from_vdf(vdf)
+                if updated_item_id:
+                    self.item_id_var.set(updated_item_id)
+                uploaded_item_id = updated_item_id or self.item_id_var.get().strip()
+                self.current_project_data.update({
+                    "last_upload_signature": self.pending_publish_signature,
+                    "last_upload_inventory": self.pending_publish_inventory or {},
+                    "last_upload_at": datetime.now(timezone.utc).isoformat(),
+                    "last_uploaded_item_id": uploaded_item_id,
+                    "item_id": uploaded_item_id or self.item_id_var.get(),
+                })
+                self._update_project_status(self.current_inventory)
+                self.save_current_project_state(quiet=True)
                 
                 # Apply Tags if present
                 if self.tags_var.get().strip():
                     self.update_workshop_tags(item_id_override=updated_item_id)
                 
-                self.root.after(0, lambda: messagebox.showinfo("Success", "SteamCMD process finished.\nCheck the console window for upload status."))
+                self.root.after(0, self.refresh_current_project_readiness)
+                self.root.after(0, lambda: messagebox.showinfo("Success", "SteamCMD finished.\nProject state and publish snapshot were updated."))
             else:
                 self.log(f"SteamCMD exited with code {p.returncode}")
                 
@@ -1388,6 +1831,8 @@ class WorkshopUploader:
         except Exception as e:
             self.log(f"Execution Error: {e}")
         finally:
+            self.pending_publish_signature = None
+            self.pending_publish_inventory = None
             self._set_busy("Upload", False)
 
     def _on_manage_selection(self, _event=None):
@@ -1408,11 +1853,13 @@ class WorkshopUploader:
         item_id = str(values[1])
         self.item_id_var.set(item_id)
 
-        if switch_to_upload:
+        if switch_to_upload and getattr(self, "notebook", None) is not None:
             self.notebook.select(self.upload_tab)
 
+        self.save_current_project_state(quiet=True)
+
         if not quiet:
-            self.log(f"Upload target set to Workshop ID {item_id}: {title}")
+            self.log(f"Project paired to Workshop ID {item_id}: {title}")
         return True
 
     def _resolve_vanity_to_steamid(self, vanity, api_key):
@@ -1475,6 +1922,7 @@ class WorkshopUploader:
             return
 
         self.log("Fetching workshop items...")
+        self.library_status_var.set("Loading Workshop library...")
         self._set_busy("Refresh", True)
         threading.Thread(target=self._refresh_worker, args=(identity_input,), daemon=True).start()
 
@@ -1502,8 +1950,10 @@ class WorkshopUploader:
                     0,
                     lambda i=item: self.tree.insert("", "end", values=(i["title"], i["publishedfileid"], i["visibility_label"], i["updated_label"]))
                 )
+            self.root.after(0, lambda: self.library_status_var.set(f"Loaded {len(items)} Workshop items for {steam_id}."))
 
         except Exception as e:
+            self.root.after(0, lambda: self.library_status_var.set("Workshop library load failed."))
             self.root.after(0, lambda: self.log(f"API Error: {self._friendly_api_error(e)}"))
         finally:
             self._set_busy("Refresh", False)
@@ -1581,11 +2031,10 @@ class WorkshopUploader:
             def do_populate():
                 self.item_id_var.set(details.get("publishedfileid", "0"))
                 self.title_var.set(details.get("title", ""))
-                self.desc_text.delete("1.0", "end")
-                self.desc_text.insert("1.0", details.get("description", ""))
+                self._set_desc_text_value(details.get("description", ""))
                 self.preview_path.set(preview_local_path)
                 self.visibility_var.set(vis_str)
-                self.notebook.select(self.upload_tab)
+                self.save_current_project_state(quiet=True)
             
             self.root.after(0, do_populate)
         except Exception as e:
