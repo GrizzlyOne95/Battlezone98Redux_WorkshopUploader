@@ -1,116 +1,113 @@
 # Battlezone 98 Redux Workshop Uploader
 
-A dedicated GUI tool for uploading and managing Steam Workshop mods for **Battlezone 98 Redux**. This tool streamlines the upload process by automating VDF creation, handling SteamCMD execution, and performing extensive safety checks on mod files to prevent common crashes and bugs.
+A desktop GUI for creating, updating, and validating Steam Workshop mods for **Battlezone 98 Redux**.
 
-<img width="1002" height="832" alt="image" src="https://github.com/user-attachments/assets/d748e2db-4de6-4b27-9514-87ac8f89f387" />
+This tool is built around a project-centric workflow:
+- pair a local mod folder to a Workshop item
+- scan the folder for common Battlezone content issues
+- review what changed since the last publish
+- publish through SteamCMD with better logging and recovery than the legacy uploader
 
+## Why Use This Instead Of The Old BZR Uploader?
 
-## Why choose this over the official BZR uploader app? 
-* **No Undocumented or unhelpful errors**: The BZR uploader app is well known to throw strange errors, and since it is not using SteamCMD you do not get any detailed logging.
-* **Much more open**: The BZR uploader app arbitrarily blocks some files from being uploaded as mods, despite them not causing any issues after extensive testing.
-* **More robust ODF and other file verification**: The BZR uploader app performs ODF header verification but its built in list actually has misspelling and missing stock headers that are valid! This tool performs accurate scanning as well as ensuring you have valid entries under each header. It also checks against various other known file errors that can cause crashes or errors.
-* **Does not set uploaded mods to public automatically**: The BZR uploader defaults to setting the mod to public every upload, with no option to adjust this. This makes private testing annoying.
-* **Catches and warns about common issues, but doesn't block upload**: The BZR uploader hard aborts upload attempts even for well known errors. It's good to be warned, but sometimes you just need to upload a quick test.
-* **Helps FIX issues, not just warn**: The BZR uploader simply throws an error; this corrects many common issues such as double TRN headers, incorrect line endings, incorrectly formatted .BMP files, hidden desktop.ini files, etc. 
+- Uses SteamCMD, so failures are easier to diagnose.
+- Does not force every upload public.
+- Keeps local project state tied to Workshop IDs.
+- Warns about common mod-breaking issues without hard-blocking every workflow.
+- Can apply one-click fixes for several common file problems.
 
-## What can this app NOT do? 
-*   **Can't be officially supported**: This is a community made, unofficial app. However, the official app has 0 support or development anymore either.
-*   **Can't stop dumb mistakes**: You're still responsible for what you upload to the workshop. This app won't fully prevent you from finding a way to upload a bad mod that causes errors or game crashes.
+## Current Workflow
 
-## Features
+Run:
 
-### 🚀 Streamlined Uploading
-*   **SteamCMD Integration**: Wraps SteamCMD command-line arguments into a user-friendly interface.
-*   **Auto-VDF Generation**: Automatically generates the required `.vdf` configuration file for Steam Workshop uploads.
-*   **2FA Support**: Built-in support for Steam Guard codes during the login process.
-*   **Preview Image Handling**: Automatically detects if preview images exceed the 1MB limit and offers to resize/compress them.
-*   **Tag Support (Experimental)**: Allows setting Workshop tags using the Steam Web API after a successful upload.
-*   **Template Wizard**: Create new project folders with pre-defined `.ini` structures and placeholder map files.
+```bash
+python uploader.py
+```
 
-### 🛡️ Mod Safety & Validation
-Before uploading, the tool scans your content folder for common errors that cause game crashes or bugs:
-*   **ODF Validation**:
-    *   Checks for unrecognized headers against `odfHeaderList.txt`.
-    *   Validates parameters against `bzrODFparams.txt`.
-    *   **Crash Prevention**: Detects specific configurations known to crash the game (e.g., `weaponMask=00000`, Hardpoints in `[CraftClass]`, Magnet `range=0`).
-*   **File Format Checks**:
-    *   **BMP**: Ensures preview images are 24-bit and do not contain color space info (which crashes the game).
-    *   **TRN**: Validates and fixes line endings (must be CRLF) to prevent terrain loading issues.
-    *   **Materials**: Scans for duplicate material names across files.
-*   **Asset Optimization**:
-    *   **Orphan Finder**: Cross-references assets in `.odf`, `.material`, and scripts to identify unused bloating files.
-    *   **VRAM Budgeting**: Estimates runtime memory usage and warns against high-VRAM textures (suggests DDS conversion).
-    *   **DDS Verification**: Identifies uncompressed texture formats and recommends conversion for performance.
-*   **Structure Validation**: Ensures the mod folder contains a valid `.ini` file and essential map files (`.hg2`, `.trn`, `.mat`, etc.) based on the map type.
+Then use the workspace like this:
 
-### 🔧 Mod Management
-*   **Manage Tab**: View your existing Workshop items.
-*   **Update Workflow**: Select an existing mod to auto-populate fields for an update.
-*   **Watch Mode**: Monitors your project folder for changes and automatically re-scans for errors.
-*   **Logs**: Built-in log viewer for SteamCMD build and transfer logs to troubleshoot failed uploads.
+1. Configure `steamcmd.exe`, login method, and optional Steam Web API key.
+2. Select or create a local mod project folder.
+3. Pair the project to an existing Workshop item from the **Workshop Library** panel, or leave it unpaired to create a new item.
+4. Fill in preview, title, description, visibility, tags, and change note.
+5. Review findings in the **Readiness** panel.
+6. Open files, apply selected fixes, apply all one-click fixes, or inspect changed files since the last publish snapshot.
+7. Click `REVIEW AND PUBLISH`.
 
-## Prerequisites
+## Main Features
 
-*   **Python 3.x**
-*   **SteamCMD**: You can point to an existing installation or use the built-in **AUTO-DOWNLOAD** feature.
-*   **Steam Account**: You must own Battlezone 98 Redux on Steam to upload to its Workshop.
+### Project Workspace
 
-## Installation
+- Saved local projects under `profiles/`
+- Automatic project autosave while editing
+- Persistent Workshop pairing by local mod folder
+- Last publish timestamp and changed-file tracking
 
-1.  Clone the repository:
-    ```bash
-    git clone https://github.com/YourUsername/Battlezone98Redux_WorkshopUploader.git
-    cd Battlezone98Redux_WorkshopUploader
-    ```
+### Workshop Library
 
-2.  Install dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
+- Load your Workshop items through the Steam Web API
+- Pair the current local project to a selected Workshop item
+- Import Workshop details such as title, description, visibility, preview, and tags into the workspace
 
-3.  (Optional) Ensure you have the validation lists in the same directory or resource path:
-    *   `odfHeaderList.txt`
-    *   `bzrODFparams.txt`
+### Safety And Validation
 
-## Usage
+- ODF header and field validation using `odfHeaderList.txt` and `bzrODFparams.txt`
+- Missing asset detection for `.odf` and `.material` references
+- TRN duplicate `[Size]` detection
+- TRN line-ending validation and correction
+- Legacy `.map` file detection and cleanup
+- Structure validation for required Battlezone content files
 
-1.  Run the script:
-    ```bash
-    python uploader.py
-    ```
+### Readiness Actions
 
-2.  **Configuration**:
-    *   Set the path to `steamcmd.exe`.
-    *   Enter your Steam Username and Password.
-    *   (Optional) Enter a Steam Web API Key to use the "Manage" tab features.
+- Open the selected file directly from a finding
+- Apply selected one-click fixes
+- Apply all available one-click fixes
+- Inspect added, modified, and removed files since the last publish snapshot
 
-3.  **Uploading a Mod**:
-    *   **Content Folder**: Browse to the folder containing your mod files.
-    *   **Preview Image**: Select a JPG/PNG image (will be converted/resized if needed).
-    *   **Metadata**: Fill in Title, Description, Visibility, and Change Notes.
-    *   Click **UPLOAD TO STEAM WORKSHOP**.
+### Publishing
 
-4.  **Safety Checks**:
-    *   If issues are found (e.g., invalid ODF headers, wrong BMP format), a warning window will appear.
-    *   You can choose to **Open** the offending file, **Cancel** the upload, or **Ignore & Continue**.
+- SteamCMD VDF generation
+- Cached credential mode or manual login
+- QR login helper
+- Upload log inspection
+- Experimental Workshop tag updates after successful publish
 
-## Configuration Files
+### Analysis
 
-The tool uses external text files to define valid ODF headers and parameters. These should be placed in the same directory as the script (or the `_internal` folder if frozen):
+- Memory and VRAM estimate report
+- Non-DDS texture warnings
+- Orphan-file detection
 
-*   `odfHeaderList.txt`: A list of valid ODF class headers (e.g., `[GameObjectClass]`, `[CraftClass]`).
-*   `bzrODFparams.txt`: A list of valid parameters for specific ODF classes.
+## Requirements
 
-## Known Issues & Limitations
+- Python 3.x
+- Dependencies from `requirements.txt`
+- SteamCMD
+- A Steam account that owns Battlezone 98 Redux
 
-*   **2FA**: You may need to check the console window spawned by SteamCMD to enter your 2FA code if the UI field doesn't pass it correctly in your specific environment, though the UI field is designed to handle it.
-*   **Linux**: While Python is cross-platform, this tool is primarily tested on Windows due to the game's ecosystem.
+Install dependencies:
 
-## Credits
+```bash
+pip install -r requirements.txt
+```
 
-*   Built with Python and Tkinter.
-*   Styled to match the Battlezone Mod Engine.
+## Files Used By The App
 
----
+- `uploader.py`: main application
+- `project_store.py`: saved project persistence
+- `mod_scanner.py`: content scanning and validation
+- `memory_analyzer.py`: texture/orphan analysis
+- `workshop_backend.py`: SteamCMD and Workshop API interactions
+- `upload_preflight.py`: upload validation and VDF writing
+- `profiles/`: saved local project state
 
-*This tool is a community creation and is not officially affiliated with Rebellion.*
+## Notes
+
+- The app is primarily intended for Windows-based Battlezone modding workflows.
+- Steam Web API features require an API key from `https://steamcommunity.com/dev/apikey`.
+- Native tag submission remains experimental and may depend on Steam-side account state.
+
+## License
+
+MIT. See [LICENSE](/C:/Users/istuart/Documents/GIT/Battlezone98Redux_WorkshopUploader/LICENSE).

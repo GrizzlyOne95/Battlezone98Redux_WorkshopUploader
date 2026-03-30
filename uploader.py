@@ -283,6 +283,10 @@ class WorkshopUploader:
         self.current_project_signature = None
         self.pending_publish_signature = None
         self.pending_publish_inventory = None
+        self.readiness_items = []
+        self.readiness_item_by_id = {}
+        self.project_autosave_token = None
+        self.autosave_suspended = False
 
         self.qr_session_id = None
         self.qr_poll_timer = None
@@ -308,6 +312,7 @@ class WorkshopUploader:
         
         self.setup_styles()
         self.setup_ui()
+        self._bind_project_autosave()
         self.refresh_recent_projects()
 
         # Load API key from secure storage; migrate legacy config value if present.
@@ -365,6 +370,48 @@ class WorkshopUploader:
                 return ""
         return ""
 
+    def _bind_project_autosave(self):
+        tracked_vars = (
+            self.mod_path,
+            self.preview_path,
+            self.title_var,
+            self.note_var,
+            self.tags_var,
+            self.visibility_var,
+            self.item_id_var,
+            self.manage_identity_var,
+        )
+        for var in tracked_vars:
+            try:
+                var.trace_add("write", self._schedule_project_autosave)
+            except Exception:
+                pass
+
+    def _schedule_project_autosave(self, *args):
+        if self.autosave_suspended:
+            return
+        if not self.mod_path.get().strip():
+            return
+        after = getattr(self.root, "after", None)
+        if after is None or type(after).__name__ == "MagicMock":
+            return
+        if self.project_autosave_token:
+            try:
+                self.root.after_cancel(self.project_autosave_token)
+            except Exception:
+                pass
+        self.project_autosave_token = self.root.after(800, self._autosave_project_state)
+
+    def _autosave_project_state(self):
+        self.project_autosave_token = None
+        if self.autosave_suspended:
+            return
+        self.save_current_project_state(quiet=True)
+
+    def _on_description_changed(self, _event=None):
+        self._update_desc_counter()
+        self._schedule_project_autosave()
+
     def _set_desc_text_value(self, value):
         if not hasattr(self, "desc_text"):
             return
@@ -374,6 +421,8 @@ class WorkshopUploader:
         except Exception:
             return
         self._update_desc_counter()
+        if not self.autosave_suspended:
+            self._schedule_project_autosave()
 
     def _normalize_visibility_value(self, value):
         text = str(value or "").strip()
@@ -406,6 +455,29 @@ class WorkshopUploader:
             if current.get(key) != previous.get(key):
                 changed += 1
         return changed
+
+    def _build_inventory_diff(self, inventory, last_snapshot):
+        current = self._build_inventory_snapshot(inventory)
+        previous = last_snapshot or {}
+        added = []
+        modified = []
+        removed = []
+
+        for rel_path in sorted(current):
+            if rel_path not in previous:
+                added.append(rel_path)
+            elif current[rel_path] != previous[rel_path]:
+                modified.append(rel_path)
+
+        for rel_path in sorted(previous):
+            if rel_path not in current:
+                removed.append(rel_path)
+
+        return {
+            "added": added,
+            "modified": modified,
+            "removed": removed,
+        }
 
     def _build_project_payload(self):
         name = os.path.basename(self.mod_path.get().rstrip("\\/")) if self.mod_path.get() else "project"
@@ -483,15 +555,19 @@ class WorkshopUploader:
         data = self.project_store.load_project(profile_path)
         self.current_project_profile_path = profile_path
         self.current_project_data = data
-        self.mod_path.set(data.get("mod_path", ""))
-        self.preview_path.set(data.get("preview_path", ""))
-        self.title_var.set(data.get("title", ""))
-        self._set_desc_text_value(data.get("description", ""))
-        self.visibility_var.set(self._normalize_visibility_value(data.get("visibility", "0 (Public)")))
-        self.item_id_var.set(data.get("item_id", "0"))
-        self.note_var.set(data.get("change_note", ""))
-        self.tags_var.set(data.get("tags", ""))
-        self.manage_identity_var.set(data.get("manage_identity", self.manage_identity_var.get()))
+        self.autosave_suspended = True
+        try:
+            self.mod_path.set(data.get("mod_path", ""))
+            self.preview_path.set(data.get("preview_path", ""))
+            self.title_var.set(data.get("title", ""))
+            self._set_desc_text_value(data.get("description", ""))
+            self.visibility_var.set(self._normalize_visibility_value(data.get("visibility", "0 (Public)")))
+            self.item_id_var.set(data.get("item_id", "0"))
+            self.note_var.set(data.get("change_note", ""))
+            self.tags_var.set(data.get("tags", ""))
+            self.manage_identity_var.set(data.get("manage_identity", self.manage_identity_var.get()))
+        finally:
+            self.autosave_suspended = False
         self.project_name_var.set((data.get("project_name") or os.path.basename(data.get("mod_path", "")) or "NO PROJECT").upper())
         mod_path = data.get("mod_path", "")
         self.project_hint_var.set(os.path.abspath(mod_path) if mod_path else "Saved project loaded.")
@@ -546,29 +622,95 @@ class WorkshopUploader:
         if not findings:
             return rows
 
-        for path, issue_type, detail, line in findings["issues"]:
-            rows.append(("Fixable" if issue_type == "Missing Fields" else "Warning", issue_type, f"{os.path.basename(path)}:{line} {detail}"))
+        mod_dir = self.mod_path.get() or ""
+
+        for row in self._get_upload_preflight().build_safety_rows(findings["issues"], mod_dir):
+            severity = "Fixable" if row["issue_type"] == "Missing Fields" else "Warning"
+            rows.append({
+                "severity": severity,
+                "type": row["issue_type"],
+                "detail": f"{row['display_path']}:{row['line']} {row['detail']}",
+                "raw_detail": row["detail"],
+                "full_path": row["full_path"],
+                "line": row["line"],
+                "action": "quick_fix" if severity == "Fixable" else "",
+            })
+
         for detail in findings["validation_errors"]:
-            rows.append(("Blocking", "Validation", detail))
+            rows.append({
+                "severity": "Blocking",
+                "type": "Validation",
+                "detail": detail,
+                "raw_detail": detail,
+                "full_path": "",
+                "line": 0,
+                "action": "",
+            })
+
         for detail in findings["validation_warnings"]:
-            rows.append(("Warning", "Validation", detail))
+            rows.append({
+                "severity": "Warning",
+                "type": "Validation",
+                "detail": detail,
+                "raw_detail": detail,
+                "full_path": "",
+                "line": 0,
+                "action": "",
+            })
+
         for path in findings["trn_duplicate_headers"]:
-            rows.append(("Fixable", "TRN Duplicate", os.path.basename(path)))
+            rows.append({
+                "severity": "Fixable",
+                "type": "TRN Duplicate",
+                "detail": os.path.basename(path),
+                "raw_detail": os.path.basename(path),
+                "full_path": path,
+                "line": 0,
+                "action": "fix_trn_duplicates",
+            })
+
         for path in findings["trn_line_endings"]:
-            rows.append(("Fixable", "TRN Line Endings", os.path.basename(path)))
+            rows.append({
+                "severity": "Fixable",
+                "type": "TRN Line Endings",
+                "detail": os.path.basename(path),
+                "raw_detail": os.path.basename(path),
+                "full_path": path,
+                "line": 0,
+                "action": "fix_trn_endings",
+            })
+
         for path in findings["legacy_files"]:
-            rows.append(("Fixable", "Legacy File", os.path.basename(path)))
+            rows.append({
+                "severity": "Fixable",
+                "type": "Legacy File",
+                "detail": os.path.basename(path),
+                "raw_detail": os.path.basename(path),
+                "full_path": path,
+                "line": 0,
+                "action": "delete_legacy",
+            })
+
         if not rows:
-            rows.append(("Ready", "Scan", "No blocking issues detected."))
+            rows.append({
+                "severity": "Ready",
+                "type": "Scan",
+                "detail": "No blocking issues detected.",
+                "raw_detail": "No blocking issues detected.",
+                "full_path": "",
+                "line": 0,
+                "action": "",
+            })
         return rows
 
     def _summarize_readiness(self, findings):
         rows = self._build_readiness_rows(findings)
         counts = {"Blocking": 0, "Fixable": 0, "Warning": 0, "Ready": 0}
-        for severity, _issue_type, _detail in rows:
+        for row in rows:
+            severity = row["severity"]
             counts[severity] = counts.get(severity, 0) + 1
         summary = f"Readiness: {counts['Blocking']} blocking, {counts['Fixable']} fixable, {counts['Warning']} warnings"
-        detail = "Ready to publish." if rows and rows[0][0] == "Ready" else "Resolve blocking items or use one-click fixes before publishing."
+        detail = "Ready to publish." if rows and rows[0]["severity"] == "Ready" else "Resolve blocking items or use one-click fixes before publishing."
         return summary, detail, rows
 
     def _update_project_status(self, inventory=None):
@@ -597,6 +739,8 @@ class WorkshopUploader:
         if not hasattr(self, "readiness_tree"):
             return None
         self.readiness_tree.delete(*self.readiness_tree.get_children())
+        self.readiness_items = []
+        self.readiness_item_by_id = {}
         if not mod_dir or not os.path.exists(mod_dir):
             self.current_inventory = []
             self.current_findings = None
@@ -613,10 +757,12 @@ class WorkshopUploader:
         self.current_project_signature = self._fingerprint_inventory(inventory)
         summary, detail, rows = self._summarize_readiness(findings)
         self.current_readiness = rows
+        self.readiness_items = rows
         self.readiness_summary_var.set(summary)
         self.readiness_detail_var.set(detail)
-        for severity, issue_type, text in rows:
-            self.readiness_tree.insert("", "end", values=(severity, issue_type, text))
+        for row in rows:
+            item_id = self.readiness_tree.insert("", "end", values=(row["severity"], row["type"], row["detail"]))
+            self.readiness_item_by_id[item_id] = row
         self._update_project_status(inventory)
         return findings
 
@@ -640,6 +786,15 @@ class WorkshopUploader:
             fixups.append(("legacy_files", f"Delete {len(findings['legacy_files'])} legacy .map files"))
 
         changed = self._count_changed_files(inventory, self.current_project_data.get("last_upload_inventory"))
+        diff = self._build_inventory_diff(inventory, self.current_project_data.get("last_upload_inventory"))
+        changed_preview = []
+        for label, paths in (("Added", diff["added"]), ("Modified", diff["modified"]), ("Removed", diff["removed"])):
+            for rel_path in paths[:4]:
+                changed_preview.append(f"{label}: {rel_path}")
+                if len(changed_preview) >= 10:
+                    break
+            if len(changed_preview) >= 10:
+                break
         return {
             "mode": mode,
             "item_id": item_id or "0",
@@ -650,6 +805,7 @@ class WorkshopUploader:
             "visibility": self._normalize_visibility_value(self.visibility_var.get()),
             "change_note": self.note_var.get().strip(),
             "changed_files": changed,
+            "changed_preview": changed_preview,
             "blockers": blockers,
             "warnings": warnings,
             "fixups": fixups,
@@ -665,6 +821,161 @@ class WorkshopUploader:
         if "legacy_files" in selected_fixup_keys and findings["legacy_files"]:
             self.delete_legacy_files(findings["legacy_files"])
         return self.refresh_current_project_readiness()
+
+    def _get_selected_readiness_rows(self):
+        if not hasattr(self, "readiness_tree"):
+            return []
+        selected = self.readiness_tree.selection()
+        return [self.readiness_item_by_id[item_id] for item_id in selected if item_id in self.readiness_item_by_id]
+
+    def _open_path_in_shell(self, path):
+        if not path or not os.path.exists(path):
+            return False
+        try:
+            if IS_WINDOWS:
+                os.startfile(path)
+            else:
+                subprocess.call(["xdg-open", path])
+            return True
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not open file: {e}")
+            return False
+
+    def open_selected_readiness_file(self):
+        rows = self._get_selected_readiness_rows()
+        if not rows:
+            messagebox.showinfo("Readiness", "Select a readiness item first.")
+            return False
+        for row in rows:
+            if self._open_path_in_shell(row.get("full_path", "")):
+                return True
+        messagebox.showinfo("Readiness", "The selected readiness item does not point to a local file.")
+        return False
+
+    def apply_selected_readiness_fixes(self):
+        rows = self._get_selected_readiness_rows()
+        if not rows:
+            messagebox.showinfo("Readiness", "Select at least one fixable readiness item first.")
+            return 0
+        return self._apply_readiness_fixes(rows)
+
+    def apply_all_readiness_fixes(self):
+        rows = [row for row in self.readiness_items if row.get("action")]
+        if not rows:
+            messagebox.showinfo("Readiness", "No one-click fixes are currently available.")
+            return 0
+        return self._apply_readiness_fixes(rows)
+
+    def _apply_readiness_fixes(self, rows):
+        quick_fix_issues = []
+        trn_duplicates = []
+        trn_endings = []
+        legacy_files = []
+
+        for row in rows:
+            action = row.get("action")
+            if action == "quick_fix":
+                full_path = row.get("full_path", "")
+                line = row.get("line", 0)
+                issue_type = row.get("type", "")
+                detail = row.get("raw_detail", row.get("detail", ""))
+                if full_path:
+                    quick_fix_issues.append((full_path, issue_type, detail, line))
+            elif action == "fix_trn_duplicates" and row.get("full_path"):
+                trn_duplicates.append(row["full_path"])
+            elif action == "fix_trn_endings" and row.get("full_path"):
+                trn_endings.append(row["full_path"])
+            elif action == "delete_legacy" and row.get("full_path"):
+                legacy_files.append(row["full_path"])
+
+        fixed_count = 0
+        if quick_fix_issues:
+            fixed_count += self.apply_quick_fixes(quick_fix_issues)
+        if trn_duplicates:
+            fixed_count += self.fix_trn_duplicates(sorted(set(trn_duplicates)))
+        if trn_endings:
+            fixed_count += self.fix_trn_files(sorted(set(trn_endings)))
+        if legacy_files:
+            fixed_count += self.delete_legacy_files(sorted(set(legacy_files)))
+
+        self.refresh_current_project_readiness()
+        self.log(f"Applied {fixed_count} readiness fixes.")
+        messagebox.showinfo("Readiness", f"Applied {fixed_count} fixes.")
+        return fixed_count
+
+    def show_changed_files(self):
+        if not self.mod_path.get().strip():
+            messagebox.showinfo("Changes", "Select a content folder first.")
+            return
+
+        inventory = self.current_inventory or self._build_mod_inventory(self.mod_path.get())
+        diff = self._build_inventory_diff(inventory, self.current_project_data.get("last_upload_inventory"))
+        snapshot_exists = bool(self.current_project_data.get("last_upload_inventory"))
+        current_paths = {entry["rel_path"]: entry["path"] for entry in inventory}
+
+        win = tk.Toplevel(self.root)
+        win.title("Changed Files Since Last Publish")
+        win.geometry("760x560")
+        win.configure(bg="#1a1a1a")
+
+        ttk.Label(win, text="CHANGED FILES", font=(self.current_font, 13, "bold"), foreground=self.colors["highlight"], background="#1a1a1a").pack(anchor="w", padx=12, pady=(12, 6))
+
+        summary = (
+            f"Added: {len(diff['added'])}    "
+            f"Modified: {len(diff['modified'])}    "
+            f"Removed: {len(diff['removed'])}"
+        )
+        ttk.Label(win, text=summary, foreground="#ffff44", background="#1a1a1a").pack(anchor="w", padx=12, pady=(0, 8))
+        if not snapshot_exists:
+            ttk.Label(win, text="No prior publish snapshot exists yet. Current files are shown as new.", foreground=self.colors["accent"], background="#1a1a1a").pack(anchor="w", padx=12, pady=(0, 8))
+
+        tree_frame = ttk.Frame(win)
+        tree_frame.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        tree = ttk.Treeview(tree_frame, columns=("Status", "Path"), show="headings")
+        tree.heading("Status", text="Status")
+        tree.heading("Path", text="Path")
+        tree.column("Status", width=90, anchor="center")
+        tree.column("Path", width=620)
+        scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+        item_paths = {}
+
+        for rel_path in diff["added"]:
+            item_id = tree.insert("", "end", values=("Added", rel_path))
+            item_paths[item_id] = current_paths.get(rel_path, "")
+        for rel_path in diff["modified"]:
+            item_id = tree.insert("", "end", values=("Modified", rel_path))
+            item_paths[item_id] = current_paths.get(rel_path, "")
+        for rel_path in diff["removed"]:
+            item_id = tree.insert("", "end", values=("Removed", rel_path))
+            item_paths[item_id] = ""
+
+        if not (diff["added"] or diff["modified"] or diff["removed"]):
+            tree.insert("", "end", values=("None", "No changes since the last publish snapshot."))
+
+        def open_selected():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showinfo("Changes", "Select a file first.", parent=win)
+                return
+            path = item_paths.get(selected[0], "")
+            if not path:
+                messagebox.showinfo("Changes", "The selected entry is not a local file you can open.", parent=win)
+                return
+            try:
+                if IS_WINDOWS:
+                    os.startfile(path)
+                else:
+                    subprocess.call(["xdg-open", path])
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open file: {e}", parent=win)
+
+        btns = ttk.Frame(win)
+        btns.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Button(btns, text="OPEN FILE", command=open_selected).pack(side="left")
+        ttk.Button(btns, text="CLOSE", command=win.destroy).pack(side="right")
 
     def _confirm_publish_review(self, plan, findings):
         wait_window = getattr(self.root, "wait_window", None)
@@ -696,6 +1007,9 @@ class WorkshopUploader:
             f"Fixable: {len(plan['fixups'])}",
             f"Warnings: {len(plan['warnings'])}",
         ]
+        if plan["changed_preview"]:
+            lines.extend(["", "Changed files preview:"])
+            lines.extend([f"  {line}" for line in plan["changed_preview"]])
         summary.insert("1.0", "\n".join(lines))
         summary.config(state="disabled")
 
@@ -849,6 +1163,11 @@ class WorkshopUploader:
 
     def on_close(self):
         self.save_config()
+        if self.project_autosave_token:
+            try:
+                self.root.after_cancel(self.project_autosave_token)
+            except Exception:
+                pass
         # Cancel any active QR polling
         if getattr(self, "qr_poll_timer", None):
             self.root.after_cancel(self.qr_poll_timer)
@@ -1099,7 +1418,7 @@ class WorkshopUploader:
         ttk.Label(frame, text="Description:").grid(row=6, column=0, sticky="nw", pady=5)
         self.desc_text = tk.Text(frame, height=10, bg="#1a1a1a", fg=self.colors["accent"], insertbackground=self.colors["highlight"], font=("Consolas", 10))
         self.desc_text.grid(row=6, column=1, columnspan=3, sticky="nsew", padx=5, pady=5)
-        self.desc_text.bind("<KeyRelease>", self._update_desc_counter)
+        self.desc_text.bind("<KeyRelease>", self._on_description_changed)
 
         self.desc_char_label = ttk.Label(frame, text=f"0 / {STEAM_DESC_LIMIT}")
         self.desc_char_label.grid(row=7, column=3, sticky="e", padx=5)
@@ -1144,6 +1463,13 @@ class WorkshopUploader:
         self.readiness_tree.configure(yscrollcommand=readiness_scroll.set)
         self.readiness_tree.pack(side="left", fill="both", expand=True)
         readiness_scroll.pack(side="right", fill="y")
+
+        actions = ttk.Frame(frame)
+        actions.pack(fill="x", pady=(8, 0))
+        ttk.Button(actions, text="OPEN", command=self.open_selected_readiness_file).pack(side="left")
+        ttk.Button(actions, text="FIX SELECTED", command=self.apply_selected_readiness_fixes).pack(side="left", padx=4)
+        ttk.Button(actions, text="FIX ALL", command=self.apply_all_readiness_fixes).pack(side="left")
+        ttk.Button(actions, text="CHANGES", command=self.show_changed_files).pack(side="right")
 
     def setup_activity_panel(self, parent):
         frame = ttk.LabelFrame(parent, text=" ACTIVITY ", padding=10)
@@ -1918,7 +2244,7 @@ class WorkshopUploader:
                 self.log(f"Auto-detected SteamID64 from local login: {identity_input}")
 
         if not identity_input:
-            messagebox.showerror("Error", "Enter SteamID64/Profile URL/Vanity in Manage tab, or use 'USE CURRENT STEAM LOGIN'.")
+            messagebox.showerror("Error", "Enter SteamID64/Profile URL/Vanity in the Workshop Library panel, or use 'USE CURRENT LOGIN'.")
             return
 
         self.log("Fetching workshop items...")
@@ -2027,13 +2353,29 @@ class WorkshopUploader:
             
             vis_map = {0: "0 (Public)", 1: "1 (Friends)", 2: "2 (Private)"}
             vis_str = vis_map.get(details.get("visibility"), "0 (Public)")
+            detail_tags = details.get("tags") or []
+            tag_names = []
+            for tag in detail_tags:
+                if isinstance(tag, dict):
+                    value = tag.get("tag") or tag.get("display_name") or ""
+                else:
+                    value = str(tag)
+                value = value.strip()
+                if value:
+                    tag_names.append(value)
 
             def do_populate():
-                self.item_id_var.set(details.get("publishedfileid", "0"))
-                self.title_var.set(details.get("title", ""))
-                self._set_desc_text_value(details.get("description", ""))
-                self.preview_path.set(preview_local_path)
-                self.visibility_var.set(vis_str)
+                self.autosave_suspended = True
+                try:
+                    self.item_id_var.set(details.get("publishedfileid", "0"))
+                    self.title_var.set(details.get("title", ""))
+                    self._set_desc_text_value(details.get("description", ""))
+                    self.preview_path.set(preview_local_path)
+                    self.visibility_var.set(vis_str)
+                    if tag_names:
+                        self.tags_var.set(", ".join(tag_names))
+                finally:
+                    self.autosave_suspended = False
                 self.save_current_project_state(quiet=True)
             
             self.root.after(0, do_populate)

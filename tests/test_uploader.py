@@ -24,6 +24,7 @@ import uploader
 from app_file_manager import AppFileManager
 from content_fixes import ContentFixer
 from memory_analyzer import MemoryAnalyzer
+from project_store import ProjectStore
 from upload_preflight import UploadPreflight
 from steamworks_tags import SteamworksTagUpdater
 
@@ -364,6 +365,116 @@ class TestWorkshopUploader(unittest.TestCase):
         loaded = manager.load_profile(profile_path)
 
         self.assertEqual(loaded, payload)
+
+    def test_project_store_round_trip_by_mod_path(self):
+        manager = AppFileManager()
+        store = ProjectStore(os.path.join(self.test_dir, "profiles"), manager)
+        mod_path = os.path.join(self.test_dir, "mods", "sample_mod")
+        os.makedirs(mod_path, exist_ok=True)
+
+        saved_path = store.save_project({
+            "project_name": "sample_mod",
+            "mod_path": mod_path,
+            "title": "Sample Mod",
+            "item_id": "123",
+        })
+        loaded = store.find_by_mod_path(mod_path)
+
+        self.assertTrue(os.path.exists(saved_path))
+        self.assertEqual(loaded["title"], "Sample Mod")
+        self.assertEqual(loaded["item_id"], "123")
+
+    def test_changed_file_count_uses_last_publish_snapshot(self):
+        tracked = os.path.join(self.test_dir, "tracked.txt")
+        added = os.path.join(self.test_dir, "added.txt")
+        with open(tracked, "w", encoding="utf-8") as f:
+            f.write("one")
+
+        first_inventory = self.uploader._build_mod_inventory(self.test_dir)
+        snapshot = self.uploader._build_inventory_snapshot(first_inventory)
+
+        with open(tracked, "w", encoding="utf-8") as f:
+            f.write("two")
+        with open(added, "w", encoding="utf-8") as f:
+            f.write("new")
+
+        second_inventory = self.uploader._build_mod_inventory(self.test_dir)
+        changed = self.uploader._count_changed_files(second_inventory, snapshot)
+
+        self.assertEqual(changed, 2)
+
+    def test_build_inventory_diff_reports_added_modified_removed(self):
+        baseline = {
+            "keep.txt": {"size": 10, "mtime_ns": 1},
+            "edit.txt": {"size": 5, "mtime_ns": 1},
+            "gone.txt": {"size": 3, "mtime_ns": 1},
+        }
+        inventory = [
+            {"rel_path": "keep.txt", "size": 10, "mtime_ns": 1},
+            {"rel_path": "edit.txt", "size": 6, "mtime_ns": 2},
+            {"rel_path": "new.txt", "size": 4, "mtime_ns": 1},
+        ]
+
+        diff = self.uploader._build_inventory_diff(inventory, baseline)
+
+        self.assertEqual(diff["added"], ["new.txt"])
+        self.assertEqual(diff["modified"], ["edit.txt"])
+        self.assertEqual(diff["removed"], ["gone.txt"])
+
+    def test_build_readiness_rows_marks_fixable_actions(self):
+        bad_trn = os.path.join(self.test_dir, "bad.trn")
+        legacy_map = os.path.join(self.test_dir, "old.map")
+        with open(bad_trn, "w", encoding="utf-8") as f:
+            f.write("[Size]\n")
+        with open(legacy_map, "w", encoding="utf-8") as f:
+            f.write("legacy")
+
+        self.uploader.mod_path.set(self.test_dir)
+        rows = self.uploader._build_readiness_rows({
+            "issues": [(bad_trn, "Missing Fields", "[CraftClass] missing: weaponName", 2)],
+            "validation_errors": [],
+            "validation_warnings": [],
+            "trn_line_endings": [bad_trn],
+            "trn_duplicate_headers": [],
+            "legacy_files": [legacy_map],
+        })
+
+        actions = {(row["type"], row["action"]) for row in rows}
+        self.assertIn(("Missing Fields", "quick_fix"), actions)
+        self.assertIn(("TRN Line Endings", "fix_trn_endings"), actions)
+        self.assertIn(("Legacy File", "delete_legacy"), actions)
+
+    def test_build_publish_plan_includes_changed_file_preview(self):
+        self.uploader.username_var.set("tester")
+        self.uploader.title_var.set("Sample")
+        self.uploader.note_var.set("note")
+        self.uploader.visibility_var.set("0 (Public)")
+        self.uploader.item_id_var.set("123")
+        self.uploader.current_project_data = {
+            "last_upload_inventory": {
+                "same.txt": {"size": 1, "mtime_ns": 1},
+                "edited.txt": {"size": 1, "mtime_ns": 1},
+            }
+        }
+        inventory = [
+            {"rel_path": "same.txt", "size": 1, "mtime_ns": 1},
+            {"rel_path": "edited.txt", "size": 2, "mtime_ns": 2},
+            {"rel_path": "new.txt", "size": 1, "mtime_ns": 1},
+        ]
+        findings = {
+            "issues": [],
+            "validation_errors": [],
+            "validation_warnings": [],
+            "trn_line_endings": [],
+            "trn_duplicate_headers": [],
+            "legacy_files": [],
+        }
+
+        plan = self.uploader._build_publish_plan("C:\\mods\\content", "C:\\mods\\preview.jpg", False, findings, inventory)
+
+        self.assertEqual(plan["changed_files"], 2)
+        self.assertTrue(any("Modified: edited.txt" == line for line in plan["changed_preview"]))
+        self.assertTrue(any("Added: new.txt" == line for line in plan["changed_preview"]))
 
     def test_app_file_manager_downloads_and_extracts_steamcmd(self):
         manager = AppFileManager()
