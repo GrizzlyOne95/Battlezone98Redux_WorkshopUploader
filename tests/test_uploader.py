@@ -6,6 +6,7 @@ import tempfile
 import shutil
 import io
 import zipfile
+import json
 
 # Mock out GUI and network libraries that might fail in a headless test environment
 sys.modules['tkinter'] = MagicMock()
@@ -256,6 +257,75 @@ class TestWorkshopUploader(unittest.TestCase):
                 use_cached=False,
                 guard_code="",
             )
+
+    def test_workshop_backend_queries_all_workshop_pages(self):
+        first = MagicMock()
+        first.json.return_value = {
+            "response": {
+                "total": 2,
+                "next_cursor": "page-2",
+                "publishedfiledetails": [{
+                    "title": "One",
+                    "publishedfileid": "111",
+                    "visibility": 0,
+                    "time_updated": 1700000000,
+                }],
+            }
+        }
+        second = MagicMock()
+        second.json.return_value = {
+            "response": {
+                "total": 2,
+                "next_cursor": "",
+                "publishedfiledetails": [{
+                    "title": "Two",
+                    "publishedfileid": "222",
+                    "visibility": 2,
+                    "time_updated": 1700000100,
+                }],
+            }
+        }
+        self.uploader.workshop_backend.steam_service.request_with_retry = MagicMock(side_effect=[first, second])
+
+        steam_id, items, meta = self.uploader.workshop_backend.query_workshop_items(
+            api_key="key",
+            identity_input="76561198000000001",
+            appid="301650",
+            resolve_steam_id=lambda identity, _key: identity,
+        )
+
+        self.assertEqual(steam_id, "76561198000000001")
+        self.assertEqual([item["publishedfileid"] for item in items], ["111", "222"])
+        self.assertEqual(meta["pages"], 2)
+        self.assertEqual(meta["total"], 2)
+        calls = self.uploader.workshop_backend.steam_service.request_with_retry.call_args_list
+        first_payload = json.loads(calls[0].kwargs["params"]["input_json"])
+        second_payload = json.loads(calls[1].kwargs["params"]["input_json"])
+        self.assertEqual(first_payload["cursor"], "*")
+        self.assertEqual(second_payload["cursor"], "page-2")
+        self.assertEqual(first_payload["query_type"], 1)
+
+    def test_workshop_backend_fetches_details_from_remote_storage_endpoint(self):
+        response = MagicMock()
+        response.json.return_value = {"response": {"publishedfiledetails": [{"publishedfileid": "123"}]}}
+        self.uploader.workshop_backend.steam_service.request_with_retry = MagicMock(return_value=response)
+
+        details = self.uploader.workshop_backend.fetch_workshop_item_details("key", "123")
+
+        self.assertEqual(details["publishedfileid"], "123")
+        args = self.uploader.workshop_backend.steam_service.request_with_retry.call_args.args
+        self.assertIn("ISteamRemoteStorage/GetPublishedFileDetails", args[1])
+
+    def test_workshop_backend_builds_login_test_command(self):
+        cmd = self.uploader.workshop_backend.build_steamcmd_login_test_command(
+            exe="steamcmd.exe",
+            user="tester",
+            pwd="secret",
+            use_cached=False,
+            guard_code="abc123",
+        )
+
+        self.assertEqual(cmd, ["steamcmd.exe", "+login", "tester", "secret", "abc123", "+quit"])
 
     def test_workshop_backend_prefers_native_steamworks_tag_update(self):
         updater = MagicMock()
@@ -652,6 +722,23 @@ class TestWorkshopUploader(unittest.TestCase):
             steam_id = self.uploader.resolve_steam_id("https://steamcommunity.com/id/grizzly", "dummy")
             self.assertEqual(steam_id, "76561198000000009")
             resolve_mock.assert_called_once()
+
+    def test_qr_poll_uses_request_id_from_session(self):
+        self.uploader.qr_session_id = "client-123"
+        self.uploader.qr_request_id = "request-456"
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"response": {}}
+        self.uploader.steam_service.poll_qr_auth_session = MagicMock(return_value=response)
+        self.uploader.root.after = MagicMock()
+
+        self.uploader.poll_qr_status()
+
+        self.uploader.steam_service.poll_qr_auth_session.assert_called_once_with(
+            client_id="client-123",
+            request_id="request-456",
+            timeout=5,
+        )
 
     def test_use_selected_item_id_for_upload_sets_update_target(self):
         self.uploader.item_id_var = DummyVar("0")

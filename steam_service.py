@@ -205,6 +205,15 @@ class SteamService:
             return data.get("steamid")
         return None
 
+    def validate_api_key(self, api_key, retry_kwargs=None):
+        retry_kwargs = retry_kwargs or {}
+        if not (api_key or "").strip():
+            return False, "missing API key"
+        steam_id = self.resolve_vanity_to_steamid("valve", api_key, retry_kwargs=retry_kwargs)
+        if steam_id:
+            return True, f"API key accepted; resolved test vanity to {steam_id}"
+        return False, "API key request completed, but the validation lookup did not resolve"
+
     def resolve_steam_id(self, identity_input, api_key, retry_kwargs=None):
         text = (identity_input or "").strip()
         if not text:
@@ -306,4 +315,5 @@ class SteamService:
             data={"client_id": client_id, "request_id": request_id or client_id},
             timeout=timeout,
         )
+        response.raise_for_status()
         return response

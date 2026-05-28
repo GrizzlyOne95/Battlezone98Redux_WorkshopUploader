@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 from datetime import datetime
@@ -27,47 +28,133 @@ class WorkshopBackend:
         cmd.extend(["+workshop_build_item", vdf, "+quit"])
         return cmd
 
+    def build_steamcmd_login_test_command(self, exe, user, pwd, use_cached, guard_code=""):
+        cmd = [exe, "+login"]
+        if user:
+            cmd.append(user)
+
+        if not use_cached:
+            if not user:
+                raise ValueError("Username is required when cached credentials are disabled.")
+            if not pwd:
+                raise ValueError("Password is required for a non-interactive login test.")
+            cmd.append(pwd)
+            if guard_code:
+                cmd.append(guard_code)
+
+        cmd.append("+quit")
+        return cmd
+
     def launch_steamcmd(self, exe, user, pwd, vdf, use_cached, guard_code="", is_windows=False):
         cmd = self.build_steamcmd_command(exe, user, pwd, vdf, use_cached, guard_code=guard_code)
         creation_flags = subprocess.CREATE_NEW_CONSOLE if is_windows else 0
         process = subprocess.Popen(cmd, creationflags=creation_flags)
         return process, cmd
 
+    def test_steamcmd_login(self, exe, user, pwd, use_cached, guard_code="", timeout=60):
+        cmd = self.build_steamcmd_login_test_command(
+            exe=exe,
+            user=user,
+            pwd=pwd,
+            use_cached=use_cached,
+            guard_code=guard_code,
+        )
+        completed = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            errors="ignore",
+            timeout=timeout,
+        )
+        output = completed.stdout or ""
+        lower = output.lower()
+        failure_markers = (
+            "login failure",
+            "invalid password",
+            "invalid login",
+            "failed to login",
+            "steam guard code is required",
+            "two-factor code mismatch",
+            "account logon denied",
+        )
+        failed = completed.returncode != 0 or any(marker in lower for marker in failure_markers)
+        succeeded = not failed
+        return {
+            "returncode": completed.returncode,
+            "success": succeeded,
+            "output": output,
+            "command": cmd,
+        }
+
     def query_workshop_items(self, api_key, identity_input, appid, resolve_steam_id):
         steam_id = resolve_steam_id(identity_input, api_key)
         if not steam_id:
-            return None, []
+            return None, [], {"pages": 0, "total": 0, "next_cursor": ""}
 
         query_url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
-        params = {
-            "key": api_key,
-            "creator_appid": appid,
-            "appid": appid,
-            "numperpage": 100,
-            "return_metadata": 1,
-            "steamid": steam_id,
-        }
-        response = self.steam_service.request_with_retry(
-            "GET",
-            query_url,
-            operation_name="Query Workshop files",
-            params=params,
-            timeout=10,
-        )
-        items = response.json().get("response", {}).get("publishedfiledetails", [])
+        cursor = "*"
+        page_count = 0
+        total = 0
+        items = []
+        seen_cursors = set()
+
+        while cursor and cursor not in seen_cursors:
+            seen_cursors.add(cursor)
+            query_payload = {
+                "query_type": 1,
+                "cursor": cursor,
+                "page": 1,
+                "creator_appid": appid,
+                "appid": appid,
+                "numperpage": 100,
+                "return_metadata": 1,
+                "steamid": steam_id,
+            }
+            response = self.steam_service.request_with_retry(
+                "GET",
+                query_url,
+                operation_name="Query Workshop files",
+                params={"key": api_key, "input_json": json.dumps(query_payload)},
+                timeout=10,
+            )
+            payload = response.json().get("response", {})
+            batch = payload.get("publishedfiledetails", []) or []
+            items.extend(batch)
+            page_count += 1
+            try:
+                total = int(payload.get("total", total or len(items)) or 0)
+            except Exception:
+                total = total or len(items)
+
+            next_cursor = str(payload.get("next_cursor", "") or "")
+            if not next_cursor or next_cursor == cursor or not batch:
+                cursor = ""
+            else:
+                cursor = next_cursor
+
         normalized = []
         vis_map = {0: "Public", 1: "Friends", 2: "Private"}
         for item in items:
+            updated = item.get("time_updated")
+            try:
+                updated_label = datetime.fromtimestamp(int(updated)).strftime("%Y-%m-%d %H:%M")
+            except Exception:
+                updated_label = "Unknown"
             normalized.append({
                 "title": item.get("title", ""),
                 "publishedfileid": item.get("publishedfileid", ""),
                 "visibility_label": vis_map.get(item.get("visibility"), "Unknown"),
-                "updated_label": datetime.fromtimestamp(item["time_updated"]).strftime("%Y-%m-%d %H:%M"),
+                "updated_label": updated_label,
             })
-        return steam_id, normalized
+        return steam_id, normalized, {
+            "pages": page_count,
+            "total": total or len(normalized),
+            "next_cursor": cursor,
+        }
 
     def fetch_workshop_item_details(self, api_key, item_id):
-        url = "https://api.steampowered.com/IPublishedFileService/GetPublishedFileDetails/v1/"
+        url = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
         response = self.steam_service.request_with_retry(
             "POST",
             url,

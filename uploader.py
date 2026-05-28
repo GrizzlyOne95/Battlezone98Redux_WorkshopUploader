@@ -247,7 +247,9 @@ class WorkshopUploader:
         
         # Variables
         self.steamcmd_path = tk.StringVar(value=self.config.get("steamcmd_path", ""))
+        self.steamcmd_path.trace_add("write", self._refresh_steamcmd_status)
         self.api_key_var = tk.StringVar(value="")
+        self.api_key_var.trace_add("write", self._on_api_key_changed)
         
         last_game = self.config.get("last_game", "BZ98R")
         if last_game not in self.games: last_game = "BZ98R"
@@ -272,6 +274,10 @@ class WorkshopUploader:
         self.use_cached_creds_var.trace_add("write", self._toggle_auth_fields)
         self.experimental_native_appid_var = tk.BooleanVar(value=self.config.get("experimental_native_appid", False))
         self.busy_status_var = tk.StringVar(value="STATUS: IDLE")
+        self.steamcmd_status_var = tk.StringVar(value="SteamCMD: not checked")
+        self.steam_login_status_var = tk.StringVar(value="Steam login: not checked")
+        self.api_key_status_var = tk.StringVar(value="API key: not checked")
+        self.owner_status_var = tk.StringVar(value="Workshop owner: not resolved")
         self._active_operations = set()
         self._busy_lock = threading.Lock()
         self._warned_no_keyring = False
@@ -289,6 +295,7 @@ class WorkshopUploader:
         self.autosave_suspended = False
 
         self.qr_session_id = None
+        self.qr_request_id = None
         self.qr_poll_timer = None
         
         self.watch_mode_var = tk.BooleanVar(value=False)
@@ -324,6 +331,8 @@ class WorkshopUploader:
 
         # Initial toggle state
         self._toggle_auth_fields()
+        self._refresh_steamcmd_status()
+        self._on_api_key_changed()
 
         # Apply theme
         self.root.configure(bg=self.colors["bg"])
@@ -1130,6 +1139,78 @@ class WorkshopUploader:
         except Exception as e:
             self.log(f"Secure key storage error: {e}")
 
+    def _on_api_key_changed(self, *args):
+        if not hasattr(self, "api_key_status_var"):
+            return
+        if self.api_key_var.get().strip():
+            self.api_key_status_var.set("API key: entered, not tested")
+        else:
+            self.api_key_status_var.set("API key: missing")
+
+    def test_api_key(self):
+        api_key = self.api_key_var.get().strip()
+        if not api_key:
+            messagebox.showerror("API Key", "Enter a Steam Web API key first.")
+            self.api_key_status_var.set("API key: missing")
+            return False
+
+        self.save_config()
+        self.api_key_status_var.set("API key: testing...")
+        self.log("Testing Steam Web API key...")
+        self._set_busy("API Key Test", True)
+        threading.Thread(target=self._test_api_key_worker, args=(api_key,), daemon=True).start()
+        return True
+
+    def _test_api_key_worker(self, api_key):
+        try:
+            ok, detail = self._get_steam_service().validate_api_key(api_key)
+            if ok:
+                self.root.after(0, lambda: self.api_key_status_var.set("API key: verified"))
+                self.root.after(0, lambda: self.log(detail))
+            else:
+                self.root.after(0, lambda: self.api_key_status_var.set("API key: failed"))
+                self.root.after(0, lambda: self.log(f"API key check failed: {detail}"))
+        except Exception as e:
+            friendly = self._friendly_api_error(e)
+            self.root.after(0, lambda: self.api_key_status_var.set("API key: failed"))
+            self.root.after(0, lambda: self.log(f"API key check failed: {friendly}"))
+        finally:
+            self._set_busy("API Key Test", False)
+
+    def resolve_owner_identity(self, quiet=False):
+        api_key = self.api_key_var.get().strip()
+        identity_input = self.manage_identity_var.get().strip()
+        if not identity_input:
+            detected = self.detect_local_steam_identity()
+            if detected:
+                identity_input = detected["steamid"]
+                self.manage_identity_var.set(identity_input)
+                self.log(f"Auto-detected SteamID64 from local login: {identity_input}")
+
+        if not api_key:
+            if not quiet:
+                messagebox.showerror("Owner", "Enter a Steam Web API key before resolving a vanity URL.")
+            self.owner_status_var.set("Workshop owner: needs API key")
+            return None
+        if not identity_input:
+            if not quiet:
+                messagebox.showerror("Owner", "Enter SteamID64, profile URL, or vanity URL.")
+            self.owner_status_var.set("Workshop owner: missing")
+            return None
+
+        self.owner_status_var.set("Workshop owner: resolving...")
+        steam_id = self.resolve_steam_id(identity_input, api_key)
+        if steam_id:
+            self.manage_identity_var.set(steam_id)
+            self.owner_status_var.set(f"Workshop owner: {steam_id}")
+            self.log(f"Resolved Workshop owner: {steam_id}")
+            return steam_id
+
+        self.owner_status_var.set("Workshop owner: could not resolve")
+        if not quiet:
+            messagebox.showerror("Owner", "Could not resolve that Steam owner. Use SteamID64, profile URL, or a valid vanity URL.")
+        return None
+
     def _set_busy(self, operation, is_busy):
         with self._busy_lock:
             if is_busy:
@@ -1144,7 +1225,17 @@ class WorkshopUploader:
         self.busy_status_var.set(status_text)
         global_state = "disabled" if is_busy else "normal"
 
-        for name in ("upload_btn", "refresh_btn", "manage_set_target_btn", "manage_update_btn", "manage_detect_btn", "manage_owner_entry"):
+        for name in (
+            "upload_btn",
+            "refresh_btn",
+            "manage_set_target_btn",
+            "manage_update_btn",
+            "manage_detect_btn",
+            "manage_owner_entry",
+            "resolve_owner_btn",
+            "test_api_key_btn",
+            "test_steam_login_btn",
+        ):
             widget = getattr(self, name, None)
             if widget is not None:
                 try:
@@ -1160,6 +1251,17 @@ class WorkshopUploader:
 
         # Respect cached-credential mode and busy mode simultaneously.
         self._toggle_auth_fields()
+
+    def _refresh_steamcmd_status(self, *args):
+        if not hasattr(self, "steamcmd_status_var"):
+            return
+        path = self.steamcmd_path.get().strip()
+        if not path:
+            self.steamcmd_status_var.set("SteamCMD: missing")
+        elif os.path.exists(path):
+            self.steamcmd_status_var.set("SteamCMD: found")
+        else:
+            self.steamcmd_status_var.set("SteamCMD: not found")
 
     def on_close(self):
         self.save_config()
@@ -1301,7 +1403,7 @@ class WorkshopUploader:
         ttk.Button(btn_row, text="IMPORT", command=self.load_profile).pack(side="right", padx=4)
 
     def setup_library_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" WORKSHOP LIBRARY ", padding=10)
+        frame = ttk.LabelFrame(parent, text=" 2. WORKSHOP LIBRARY ", padding=10)
         frame.pack(fill="both", expand=True)
 
         ctrl_row = ttk.Frame(frame)
@@ -1320,8 +1422,11 @@ class WorkshopUploader:
         self.manage_owner_entry.pack(side="left", fill="x", expand=True, padx=6)
         self.manage_detect_btn = ttk.Button(identity_row, text="USE CURRENT LOGIN", command=self.use_local_steam_identity)
         self.manage_detect_btn.pack(side="left")
+        self.resolve_owner_btn = ttk.Button(identity_row, text="RESOLVE", command=self.resolve_owner_identity)
+        self.resolve_owner_btn.pack(side="left", padx=(4, 0))
 
         ttk.Label(frame, textvariable=self.library_status_var, foreground="#ffff44").pack(anchor="w", pady=(0, 6))
+        ttk.Label(frame, textvariable=self.owner_status_var, foreground=self.colors["accent"]).pack(anchor="w", pady=(0, 6))
 
         tree_frame = ttk.Frame(frame)
         tree_frame.pack(fill="both", expand=True)
@@ -1342,7 +1447,7 @@ class WorkshopUploader:
         self.tree.bind("<Double-1>", lambda _e: self.prepare_update())
 
     def setup_access_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" ACCESS ", padding=10)
+        frame = ttk.LabelFrame(parent, text=" 1. ACCESS SETUP ", padding=10)
         frame.pack(fill="x", pady=(0, 10))
         frame.columnconfigure(1, weight=3)
         frame.columnconfigure(3, weight=2)
@@ -1368,19 +1473,33 @@ class WorkshopUploader:
 
         auth_row = ttk.Frame(frame)
         auth_row.grid(row=2, column=2, columnspan=2, sticky="w")
-        self.qr_btn = ttk.Button(auth_row, text="LOGIN WITH QR", command=self.start_qr_login)
+        self.qr_btn = ttk.Button(auth_row, text="QR WEB CHECK", command=self.start_qr_login)
         self.qr_btn.pack(side="left")
-        cached_cb = ttk.Checkbutton(auth_row, text="USE CACHED LOGIN", variable=self.use_cached_creds_var)
+        cached_cb = ttk.Checkbutton(auth_row, text="USE EXISTING STEAMCMD LOGIN", variable=self.use_cached_creds_var)
         cached_cb.pack(side="left", padx=10)
+        self.test_steam_login_btn = ttk.Button(auth_row, text="TEST STEAMCMD LOGIN", command=self.test_steamcmd_login)
+        self.test_steam_login_btn.pack(side="left")
 
         ttk.Label(frame, text="Steam Web API Key:").grid(row=3, column=0, sticky="w", pady=(5, 0))
         ttk.Entry(frame, textvariable=self.api_key_var, show="*").grid(row=3, column=1, sticky="ew", padx=5, pady=(5, 0))
         ttk.Button(frame, text="?", command=self.open_api_key_link, width=3).grid(row=3, column=2, sticky="w", padx=(0, 5), pady=(5, 0))
+        self.test_api_key_btn = ttk.Button(frame, text="TEST KEY", command=self.test_api_key)
+        self.test_api_key_btn.grid(row=3, column=3, sticky="w", pady=(5, 0))
         native_appid_cb = ttk.Checkbutton(frame, text="NATIVE TAGS VIA steam_appid.txt", variable=self.experimental_native_appid_var)
         native_appid_cb.grid(row=4, column=1, columnspan=3, sticky="w", pady=(5, 0))
 
+        status_row = ttk.Frame(frame)
+        status_row.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        for status_var in (
+            self.steamcmd_status_var,
+            self.steam_login_status_var,
+            self.api_key_status_var,
+            self.owner_status_var,
+        ):
+            ttk.Label(status_row, textvariable=status_var, foreground="#ffff44").pack(side="left", padx=(0, 18))
+
     def setup_editor_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" PROJECT WORKSPACE ", padding=10)
+        frame = ttk.LabelFrame(parent, text=" 3. PROJECT WORKSPACE ", padding=10)
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(1, weight=3)
         frame.columnconfigure(3, weight=2)
@@ -1444,7 +1563,7 @@ class WorkshopUploader:
         self._update_upload_mode_indicator()
 
     def setup_readiness_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" READINESS ", padding=10)
+        frame = ttk.LabelFrame(parent, text=" 4. READINESS ", padding=10)
         frame.pack(fill="both", expand=True, pady=(0, 10))
 
         ttk.Label(frame, textvariable=self.readiness_summary_var, foreground=self.colors["highlight"], font=(self.current_font, 12, "bold")).pack(anchor="w")
@@ -1472,7 +1591,7 @@ class WorkshopUploader:
         ttk.Button(actions, text="CHANGES", command=self.show_changed_files).pack(side="right")
 
     def setup_activity_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" ACTIVITY ", padding=10)
+        frame = ttk.LabelFrame(parent, text=" ACTIVITY LOG ", padding=10)
         frame.pack(fill="both", expand=True)
 
         self.log_box = tk.Text(frame, height=12, state="disabled", bg="#050505", fg=self.colors["fg"], font=("Consolas", 9))
@@ -1570,6 +1689,60 @@ class WorkshopUploader:
 
     def open_api_key_link(self):
         webbrowser.open("https://steamcommunity.com/dev/apikey")
+
+    def test_steamcmd_login(self):
+        exe = self.steamcmd_path.get().strip()
+        user = self.username_var.get().strip()
+        pwd = self.password_var.get()
+        guard_code = self.steam_guard_var.get().strip()
+        use_cached = self.use_cached_creds_var.get()
+
+        if not exe or not os.path.exists(exe):
+            self.steamcmd_status_var.set("SteamCMD: not found")
+            messagebox.showerror("SteamCMD Login", "Set a valid steamcmd.exe path first.")
+            return False
+
+        if not use_cached and (not user or not pwd):
+            self.steam_login_status_var.set("Steam login: needs username/password")
+            messagebox.showerror("SteamCMD Login", "Manual login testing needs both username and password. Use cached login if SteamCMD is already authenticated.")
+            return False
+
+        self.steam_login_status_var.set("Steam login: testing...")
+        self.log("Testing SteamCMD login...")
+        self._set_busy("SteamCMD Login Test", True)
+        threading.Thread(
+            target=self._test_steamcmd_login_worker,
+            args=(exe, user, pwd, use_cached, guard_code),
+            daemon=True,
+        ).start()
+        return True
+
+    def _test_steamcmd_login_worker(self, exe, user, pwd, use_cached, guard_code):
+        try:
+            result = self._get_workshop_backend().test_steamcmd_login(
+                exe=exe,
+                user=user,
+                pwd=pwd,
+                use_cached=use_cached,
+                guard_code=guard_code,
+                timeout=60,
+            )
+            output = result.get("output", "")
+            tail = "\n".join(output.splitlines()[-8:])
+            if result.get("success"):
+                self.root.after(0, lambda: self.steam_login_status_var.set("Steam login: verified"))
+                self.root.after(0, lambda: self.log("SteamCMD login check passed."))
+            else:
+                self.root.after(0, lambda: self.steam_login_status_var.set("Steam login: failed"))
+                self.root.after(0, lambda: self.log(f"SteamCMD login check failed.\n{tail}"))
+        except subprocess.TimeoutExpired:
+            self.root.after(0, lambda: self.steam_login_status_var.set("Steam login: timed out"))
+            self.root.after(0, lambda: self.log("SteamCMD login check timed out. If SteamCMD is prompting, complete a manual login in a console first."))
+        except Exception as e:
+            self.root.after(0, lambda: self.steam_login_status_var.set("Steam login: failed"))
+            self.root.after(0, lambda: self.log(f"SteamCMD login check failed: {e}"))
+        finally:
+            self._set_busy("SteamCMD Login Test", False)
 
     def resize_preview_image(self, image_path):
         try:
@@ -1750,13 +1923,17 @@ class WorkshopUploader:
             )
             
             client_id = res.get("client_id")
+            request_id = res.get("request_id")
             challenge_url = res.get("challenge_url")
             
-            if not client_id or not challenge_url:
+            if not client_id or not request_id or not challenge_url:
                 self.log("Error: Invalid response from Steam API.")
+                messagebox.showerror("QR Login Error", "Steam did not return a complete QR session.")
                 return
 
             self.qr_session_id = client_id
+            self.qr_request_id = request_id
+            self.steam_login_status_var.set("Steam login: QR pending")
             
             # Step 2: Show QR Window
             self.show_qr_window(challenge_url)
@@ -1771,11 +1948,19 @@ class WorkshopUploader:
     def show_qr_window(self, challenge_url):
         self.qr_win = tk.Toplevel(self.root)
         self.qr_win.title("Steam QR Login")
-        self.qr_win.geometry("400x520")
+        self.qr_win.geometry("430x560")
         self.qr_win.configure(bg="#1a1a1a")
         self.qr_win.resizable(False, False)
         
         ttk.Label(self.qr_win, text="SCAN WITH STEAM MOBILE APP", font=("Consolas", 12, "bold"), foreground=self.colors["highlight"], background="#1a1a1a").pack(pady=10)
+        ttk.Label(
+            self.qr_win,
+            text="This verifies the web QR session only. Use TEST STEAMCMD LOGIN to verify publishing credentials.",
+            background="#1a1a1a",
+            foreground="#ffcc66",
+            justify="center",
+            wraplength=380,
+        ).pack(padx=20, pady=(0, 6))
         
         # QR Code Frame (Center aligned)
         qr_frame = tk.Frame(self.qr_win, bg="#ffffff", padx=10, pady=10)
@@ -1815,7 +2000,7 @@ class WorkshopUploader:
         try:
             r = self._get_steam_service().poll_qr_auth_session(
                 client_id=self.qr_session_id,
-                request_id=self.qr_session_id,
+                request_id=self.qr_request_id,
                 timeout=5,
             )
             if r.status_code == 404: # Session expired or invalid
@@ -1836,34 +2021,43 @@ class WorkshopUploader:
             self.qr_poll_timer = self.root.after(2000, self.poll_qr_status)
             
         except Exception as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            if status == 404:
+                self.log("QR Session expired.")
+                self.cancel_qr_login()
+                return
             # Minor errors (timeout etc) are ignored during polling
             self.qr_poll_timer = self.root.after(2000, self.poll_qr_status)
 
     def handle_qr_success(self, res):
-        self.log("QR Login Successful!")
-        refresh_token = res.get("refresh_token")
+        self.log("QR session confirmed.")
         account_name = res.get("account_name")
         
         if account_name:
             self.username_var.set(account_name)
             
-        # We don't have a secure way to store the refresh token for SteamCMD directly,
-        # but we can use it to fetch more details or confirm login.
-        # For now, we populate the username and tell the user they can use cached creds.
-        
-        messagebox.showinfo("Success", f"Logged in as {account_name}.\n\nYou can now use 'USE CACHED CREDENTIALS' or proceed.")
+        self.steam_login_status_var.set("Steam login: QR confirmed, SteamCMD not verified")
+        messagebox.showinfo(
+            "QR Confirmed",
+            f"Steam QR confirmed for {account_name or 'this account'}.\n\n"
+            "This does not create SteamCMD cached credentials. Click TEST STEAMCMD LOGIN before publishing.",
+        )
         
         if hasattr(self, 'qr_win'):
             self.qr_win.destroy()
         self.qr_session_id = None
+        self.qr_request_id = None
 
     def cancel_qr_login(self):
         if self.qr_poll_timer:
             self.root.after_cancel(self.qr_poll_timer)
             self.qr_poll_timer = None
         self.qr_session_id = None
+        self.qr_request_id = None
         if hasattr(self, 'qr_win'):
             self.qr_win.destroy()
+        if hasattr(self, "steam_login_status_var"):
+            self.steam_login_status_var.set("Steam login: QR cancelled")
         self.log("QR Login cancelled.")
 
     def _toggle_auth_fields(self, *args):
@@ -2177,6 +2371,10 @@ class WorkshopUploader:
 
         title = str(values[0])
         item_id = str(values[1])
+        if not item_id or not item_id.isdigit():
+            if not quiet:
+                messagebox.showinfo("Info", "Select a Workshop item first.")
+            return False
         self.item_id_var.set(item_id)
 
         if switch_to_upload and getattr(self, "notebook", None) is not None:
@@ -2228,27 +2426,24 @@ class WorkshopUploader:
             self.username_var.set(account["account_name"])
 
         display_name = account.get("persona_name") or account.get("account_name") or account["steamid"]
+        self.owner_status_var.set(f"Workshop owner: {account['steamid']}")
+        self.steam_login_status_var.set(f"Steam login: detected {display_name}")
         self.log(f"Detected Steam login: {display_name} ({account['steamid']})")
 
     def refresh_workshop_items(self):
         if not self.api_key_var.get():
             messagebox.showerror("Error", "Steam Web API Key is required for this feature.")
+            self.api_key_status_var.set("API key: missing")
             return
 
-        identity_input = self.manage_identity_var.get().strip()
-        if not identity_input:
-            detected = self.detect_local_steam_identity()
-            if detected:
-                identity_input = detected["steamid"]
-                self.manage_identity_var.set(identity_input)
-                self.log(f"Auto-detected SteamID64 from local login: {identity_input}")
-
+        identity_input = self.resolve_owner_identity(quiet=True)
         if not identity_input:
             messagebox.showerror("Error", "Enter SteamID64/Profile URL/Vanity in the Workshop Library panel, or use 'USE CURRENT LOGIN'.")
             return
 
-        self.log("Fetching workshop items...")
-        self.library_status_var.set("Loading Workshop library...")
+        self.save_config()
+        self.log("Fetching all Workshop items...")
+        self.library_status_var.set("Loading Workshop library pages...")
         self._set_busy("Refresh", True)
         threading.Thread(target=self._refresh_worker, args=(identity_input,), daemon=True).start()
 
@@ -2256,7 +2451,7 @@ class WorkshopUploader:
         try:
             api_key = self.api_key_var.get()
             appid = self.games[self.game_var.get()]["appid"]
-            steam_id, items = self._get_workshop_backend().query_workshop_items(
+            steam_id, items, meta = self._get_workshop_backend().query_workshop_items(
                 api_key=api_key,
                 identity_input=identity_input,
                 appid=appid,
@@ -2264,10 +2459,13 @@ class WorkshopUploader:
             )
 
             if not steam_id:
-                self.root.after(0, lambda: self.log("Error: Could not resolve owner. Use SteamID64, profile URL, vanity URL, or 'USE CURRENT STEAM LOGIN'."))
+                self.root.after(0, lambda: self.owner_status_var.set("Workshop owner: could not resolve"))
+                self.root.after(0, lambda: self.log("Error: Could not resolve owner. Use SteamID64, profile URL, vanity URL, or 'USE CURRENT LOGIN'."))
                 return
 
             self.root.after(0, lambda: self.manage_identity_var.set(steam_id))
+            self.root.after(0, lambda: self.owner_status_var.set(f"Workshop owner: {steam_id}"))
+            self.root.after(0, lambda: self.api_key_status_var.set("API key: accepted"))
             
             self.root.after(0, lambda: self.tree.delete(*self.tree.get_children()))
             
@@ -2276,10 +2474,15 @@ class WorkshopUploader:
                     0,
                     lambda i=item: self.tree.insert("", "end", values=(i["title"], i["publishedfileid"], i["visibility_label"], i["updated_label"]))
                 )
-            self.root.after(0, lambda: self.library_status_var.set(f"Loaded {len(items)} Workshop items for {steam_id}."))
+            if not items:
+                self.root.after(0, lambda: self.tree.insert("", "end", values=("(No Workshop items returned)", "", "", "")))
+            pages = meta.get("pages", 0)
+            total = meta.get("total", len(items))
+            self.root.after(0, lambda: self.library_status_var.set(f"Loaded {len(items)} of {total} Workshop items for {steam_id} across {pages} page(s)."))
 
         except Exception as e:
             self.root.after(0, lambda: self.library_status_var.set("Workshop library load failed."))
+            self.root.after(0, lambda: self.api_key_status_var.set("API key: failed or unauthorized"))
             self.root.after(0, lambda: self.log(f"API Error: {self._friendly_api_error(e)}"))
         finally:
             self._set_busy("Refresh", False)
@@ -2329,6 +2532,9 @@ class WorkshopUploader:
         if not selected: return
         
         item_id = self.tree.item(selected[0])['values'][1]
+        if not item_id or not str(item_id).isdigit():
+            messagebox.showinfo("Info", "Select a Workshop item first.")
+            return
         self.use_selected_item_id_for_upload(switch_to_upload=False, quiet=True)
         self.log(f"Fetching details for item {item_id}...")
         self._set_busy("Prepare Update", True)
