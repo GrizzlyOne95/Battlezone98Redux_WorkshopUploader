@@ -19,14 +19,14 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            binary_name: BZR_Workshop_Uploader_Windows
-            artifact_name: BZR_Workshop_Uploader_Windows.exe
+            platform: windows
+            artifact_name: BZWorkshopUploader.exe
           - os: ubuntu-latest
-            binary_name: BZR_Workshop_Uploader_Linux
-            artifact_name: BZR_Workshop_Uploader_Linux
+            platform: linux
+            artifact_name: BZWorkshopUploader
           - os: macos-latest
-            binary_name: BZR_Workshop_Uploader_MacOS
-            artifact_name: BZR_Workshop_Uploader_MacOS
+            platform: macos
+            artifact_name: BZWorkshopUploader
 
     steps:
     - uses: actions/checkout@v4
@@ -47,25 +47,30 @@ jobs:
       run: |
         python scripts/generate_app_icon.py branding/repo_icon.svg branding/app_icon.ico --png branding/app_icon.png
 
+    - name: Generate Windows version metadata
+      if: matrix.os == 'windows-latest'
+      run: |
+        python scripts/generate_version_info.py --version "${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '0.0.0' }}" --output branding/version_info.txt
+
     - name: Build with PyInstaller (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        python -m PyInstaller --noconfirm --onefile --windowed --name "${{ matrix.binary_name }}" --icon "branding/app_icon.ico" --add-data "branding/app_icon.ico;branding" --add-data "branding/app_icon.png;branding" --add-data "BZONE.ttf;." --add-data "bzrODFparams.txt;." --add-data "odfHeaderList.txt;." --runtime-hook branding/pyinstaller_icon_hook.py uploader.py
+        python -m PyInstaller --noconfirm --onefile --windowed --name "BZWorkshopUploader" --icon "branding/app_icon.ico" --version-file "branding/version_info.txt" --add-data "branding/app_icon.ico;branding" --add-data "branding/app_icon.png;branding" --add-data "BZONE.ttf;." --add-data "bzrODFparams.txt;." --add-data "odfHeaderList.txt;." --runtime-hook branding/pyinstaller_icon_hook.py uploader.py
 
     - name: Build with PyInstaller (Linux)
       if: matrix.os == 'ubuntu-latest'
       run: |
-        python -m PyInstaller --noconfirm --onefile --windowed --name "${{ matrix.binary_name }}" --icon "branding/app_icon.ico" --add-data "branding/app_icon.ico:branding" --add-data "branding/app_icon.png:branding" --add-data "BZONE.ttf:." --add-data "bzrODFparams.txt:." --add-data "odfHeaderList.txt:." --runtime-hook branding/pyinstaller_icon_hook.py uploader.py
+        python -m PyInstaller --noconfirm --onefile --windowed --name "BZWorkshopUploader" --icon "branding/app_icon.ico" --add-data "branding/app_icon.ico:branding" --add-data "branding/app_icon.png:branding" --add-data "BZONE.ttf:." --add-data "bzrODFparams.txt:." --add-data "odfHeaderList.txt:." --runtime-hook branding/pyinstaller_icon_hook.py uploader.py
 
     - name: Build with PyInstaller (MacOS)
       if: matrix.os == 'macos-latest'
       run: |
-        python -m PyInstaller --noconfirm --onefile --windowed --name "${{ matrix.binary_name }}" --icon "branding/app_icon.ico" --add-data "branding/app_icon.ico:branding" --add-data "branding/app_icon.png:branding" --add-data "BZONE.ttf:." --add-data "bzrODFparams.txt:." --add-data "odfHeaderList.txt:." --runtime-hook branding/pyinstaller_icon_hook.py uploader.py
+        python -m PyInstaller --noconfirm --onefile --windowed --name "BZWorkshopUploader" --icon "branding/app_icon.ico" --add-data "branding/app_icon.ico:branding" --add-data "branding/app_icon.png:branding" --add-data "BZONE.ttf:." --add-data "bzrODFparams.txt:." --add-data "odfHeaderList.txt:." --runtime-hook branding/pyinstaller_icon_hook.py uploader.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ matrix.binary_name }}
+        name: Battlezone98Redux_WorkshopUploader-${{ matrix.platform }}
         path: dist/${{ matrix.artifact_name }}
 
   release:
@@ -76,13 +81,35 @@ jobs:
     steps:
     - name: Download all artifacts
       uses: actions/download-artifact@v4
+      with:
+        path: release-artifacts
+
+    - name: Package versioned release archives
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p release-packages/windows release-packages/linux release-packages/macos
+
+        cp release-artifacts/Battlezone98Redux_WorkshopUploader-windows/BZWorkshopUploader.exe release-packages/windows/
+        cp release-artifacts/Battlezone98Redux_WorkshopUploader-linux/BZWorkshopUploader release-packages/linux/
+        cp release-artifacts/Battlezone98Redux_WorkshopUploader-macos/BZWorkshopUploader release-packages/macos/
+
+        chmod +x release-packages/linux/BZWorkshopUploader release-packages/macos/BZWorkshopUploader
+
+        (cd release-packages/windows && zip -q ../Battlezone98Redux_WorkshopUploader-${GITHUB_REF_NAME}-windows.zip BZWorkshopUploader.exe)
+        (cd release-packages/linux && tar -czf ../Battlezone98Redux_WorkshopUploader-${GITHUB_REF_NAME}-linux.tar.gz BZWorkshopUploader)
+        (cd release-packages/macos && tar -czf ../Battlezone98Redux_WorkshopUploader-${GITHUB_REF_NAME}-macos.tar.gz BZWorkshopUploader)
+
+        ls -lh release-packages/
 
     - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
         files: |
-          BZR_Workshop_Uploader_Windows/BZR_Workshop_Uploader_Windows.exe
-          BZR_Workshop_Uploader_Linux/BZR_Workshop_Uploader_Linux
-          BZR_Workshop_Uploader_MacOS/BZR_Workshop_Uploader_MacOS
+          release-packages/Battlezone98Redux_WorkshopUploader-v*-windows.zip
+          release-packages/Battlezone98Redux_WorkshopUploader-v*-linux.tar.gz
+          release-packages/Battlezone98Redux_WorkshopUploader-v*-macos.tar.gz
+        fail_on_unmatched_files: true
+        generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
