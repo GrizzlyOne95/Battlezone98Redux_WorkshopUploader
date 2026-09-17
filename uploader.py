@@ -50,6 +50,58 @@ REQUEST_RETRY_ATTEMPTS = 3
 REQUEST_BACKOFF_SECONDS = 1.0
 KEYRING_SERVICE = "BattlezoneWorkshopUploader"
 KEYRING_API_KEY_ACCOUNT = "steam_web_api_key"
+APP_USER_MODEL_ID = "GrizzlyOne95.Battlezone98Redux.WorkshopUploader"
+
+
+def _set_app_user_model_id():
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes as _ctypes
+
+        _ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
+
+
+def _resolve_bundled_icon(name):
+    """Locate a bundled icon working from source and under sys._MEIPASS."""
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, "branding", name))
+        candidates.append(os.path.join(meipass, name))
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates.append(os.path.join(here, "branding", name))
+    candidates.append(os.path.join(here, name))
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def apply_window_icon(window):
+    """Apply the canonical app icon to a Tk/Toplevel window."""
+    try:
+        ico_path = _resolve_bundled_icon("app_icon.ico")
+        if ico_path:
+            try:
+                window.iconbitmap(ico_path)
+            except Exception:
+                pass
+        png_path = _resolve_bundled_icon("app_icon.png")
+        if png_path:
+            try:
+                image = tk.PhotoImage(file=png_path)
+                window.iconphoto(True, image)
+                window._battlezone_app_icon = image
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
+_set_app_user_model_id()
 
 class ToolTip:
     def __init__(self, widget, text, bg="#1a1a1a", fg="#00ffff"):
@@ -80,6 +132,7 @@ class ToolTip:
 class TemplateWizard(tk.Toplevel):
     def __init__(self, parent, colors, on_success):
         super().__init__(parent)
+        apply_window_icon(self)
         self.title("New Project Wizard")
         self.geometry("500x550")
         self.configure(bg=colors["bg"])
@@ -209,6 +262,7 @@ gameType = "{g_type}"
 class WorkshopUploader:
     def __init__(self, root):
         self.root = root
+        apply_window_icon(self.root)
         self.root.title("Battlezone Workshop Uploader")
         self.root.geometry("1360x900")
         
@@ -923,6 +977,7 @@ class WorkshopUploader:
         current_paths = {entry["rel_path"]: entry["path"] for entry in inventory}
 
         win = tk.Toplevel(self.root)
+        apply_window_icon(win)
         win.title("Changed Files Since Last Publish")
         win.geometry("760x560")
         win.configure(bg="#1a1a1a")
@@ -995,6 +1050,7 @@ class WorkshopUploader:
             return True, []
 
         win = tk.Toplevel(self.root)
+        apply_window_icon(win)
         win.title("Review Publish Plan")
         win.geometry("860x620")
         win.configure(bg="#1a1a1a")
@@ -1947,6 +2003,7 @@ class WorkshopUploader:
 
     def show_qr_window(self, challenge_url):
         self.qr_win = tk.Toplevel(self.root)
+        apply_window_icon(self.qr_win)
         self.qr_win.title("Steam QR Login")
         self.qr_win.geometry("430x560")
         self.qr_win.configure(bg="#1a1a1a")
@@ -2101,6 +2158,7 @@ class WorkshopUploader:
 
     def show_safety_warning(self, issues):
         win = tk.Toplevel(self.root)
+        apply_window_icon(win)
         win.title("Safety Check - Suspicious ODF Headers")
         win.geometry("700x500")
         win.configure(bg="#1a1a1a")
@@ -2606,6 +2664,7 @@ class WorkshopUploader:
         logs = self._get_workshop_backend().get_log_paths(sc_exe, appid)
         
         win = tk.Toplevel(self.root)
+        apply_window_icon(win)
         win.title("SteamCMD Logs")
         win.geometry("900x600")
         win.configure(bg="#1a1a1a")

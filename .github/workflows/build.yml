@@ -43,20 +43,24 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
+    - name: Generate canonical app icon
+      run: |
+        python scripts/generate_app_icon.py branding/repo_icon.svg branding/app_icon.ico --png branding/app_icon.png
+
     - name: Build with PyInstaller (Windows)
       if: matrix.os == 'windows-latest'
       run: |
-        python -m PyInstaller --noconfirm --onefile --windowed --name "${{ matrix.binary_name }}" --icon "branding/app_icon.png" --add-data "branding/app_icon.png;branding" --add-data "BZONE.ttf;." --add-data "bzrODFparams.txt;." --add-data "odfHeaderList.txt;." --runtime-hook branding/pyinstaller_icon_hook.py uploader.py
+        python -m PyInstaller --noconfirm --onefile --windowed --name "${{ matrix.binary_name }}" --icon "branding/app_icon.ico" --add-data "branding/app_icon.ico;branding" --add-data "branding/app_icon.png;branding" --add-data "BZONE.ttf;." --add-data "bzrODFparams.txt;." --add-data "odfHeaderList.txt;." --runtime-hook branding/pyinstaller_icon_hook.py uploader.py
 
     - name: Build with PyInstaller (Linux)
       if: matrix.os == 'ubuntu-latest'
       run: |
-        python -m PyInstaller --noconfirm --onefile --windowed --name "${{ matrix.binary_name }}" --icon "branding/app_icon.png" --add-data "branding/app_icon.png:branding" --add-data "BZONE.ttf:." --add-data "bzrODFparams.txt:." --add-data "odfHeaderList.txt:." --runtime-hook branding/pyinstaller_icon_hook.py uploader.py
+        python -m PyInstaller --noconfirm --onefile --windowed --name "${{ matrix.binary_name }}" --icon "branding/app_icon.ico" --add-data "branding/app_icon.ico:branding" --add-data "branding/app_icon.png:branding" --add-data "BZONE.ttf:." --add-data "bzrODFparams.txt:." --add-data "odfHeaderList.txt:." --runtime-hook branding/pyinstaller_icon_hook.py uploader.py
 
     - name: Build with PyInstaller (MacOS)
       if: matrix.os == 'macos-latest'
       run: |
-        python -m PyInstaller --noconfirm --onefile --windowed --name "${{ matrix.binary_name }}" --icon "branding/app_icon.png" --add-data "branding/app_icon.png:branding" --add-data "BZONE.ttf:." --add-data "bzrODFparams.txt:." --add-data "odfHeaderList.txt:." --runtime-hook branding/pyinstaller_icon_hook.py uploader.py
+        python -m PyInstaller --noconfirm --onefile --windowed --name "${{ matrix.binary_name }}" --icon "branding/app_icon.ico" --add-data "branding/app_icon.ico:branding" --add-data "branding/app_icon.png:branding" --add-data "BZONE.ttf:." --add-data "bzrODFparams.txt:." --add-data "odfHeaderList.txt:." --runtime-hook branding/pyinstaller_icon_hook.py uploader.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
