@@ -1,4 +1,4 @@
-# Battlezone 98 Redux Workshop Uploader
+# Battlezone Workshop Uploader
 
 A desktop GUI for creating, updating, and validating Steam Workshop mods for **Battlezone 98 Redux**.
 
@@ -7,6 +7,32 @@ This tool is built around a project-centric workflow:
 - scan the folder for common Battlezone content issues
 - review what changed since the last publish
 - publish through SteamCMD with better logging and recovery than the legacy uploader
+
+## Release Builds
+
+Download the latest platform archive from the [Releases](https://github.com/GrizzlyOne95/Battlezone98Redux_WorkshopUploader/releases) page.
+
+Executable names are intentionally stable and versionless:
+
+- Windows: `BZWorkshopUploader.exe`
+- Linux/macOS: `BZWorkshopUploader`
+
+Release archives carry the version and platform, for example:
+
+- `Battlezone98Redux_WorkshopUploader-v1.6-windows.zip`
+- `Battlezone98Redux_WorkshopUploader-v1.6-linux.tar.gz`
+- `Battlezone98Redux_WorkshopUploader-v1.6-macos.tar.gz`
+
+Official Windows builds use the shared **Battlezone Modding Tools** product identity:
+
+```text
+FileDescription: Battlezone Workshop Uploader
+ProductName: Battlezone Modding Tools
+CompanyName: GrizzlyOne95
+OriginalFilename: BZWorkshopUploader.exe
+```
+
+`FileVersion` and `ProductVersion` are derived from the release tag. Non-release CI builds use neutral `0.0.0` file metadata.
 
 ## Why Use This Instead Of The Old BZR Uploader?
 
@@ -110,4 +136,4 @@ pip install -r requirements.txt
 
 ## License
 
-MIT. See [LICENSE](/C:/Users/istuart/Documents/GIT/Battlezone98Redux_WorkshopUploader/LICENSE).
+MIT. See [LICENSE](LICENSE).
