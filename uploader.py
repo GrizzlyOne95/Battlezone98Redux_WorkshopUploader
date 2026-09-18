@@ -876,6 +876,7 @@ class WorkshopUploader:
             self.current_readiness = None
             self.readiness_summary_var.set("Readiness: Select a content folder.")
             self.readiness_detail_var.set("")
+            self._set_readiness_expanded(False)
             self._update_project_status([])
             return None
 
@@ -892,6 +893,8 @@ class WorkshopUploader:
         for row in rows:
             item_id = self.readiness_tree.insert("", "end", values=(row["severity"], row["type"], row["detail"]))
             self.readiness_item_by_id[item_id] = row
+        needs_attention = any(row.get("severity") != "Ready" for row in rows)
+        self._set_readiness_expanded(needs_attention)
         self._update_project_status(inventory)
         return findings
 
@@ -1311,6 +1314,8 @@ class WorkshopUploader:
                 self.log(f"Auto-detected SteamID64 from local login: {identity_input}")
 
         if not api_key:
+            if hasattr(self, "access_advanced_frame"):
+                self._set_access_advanced(True)
             if not quiet:
                 messagebox.showerror("Owner", "Enter a Steam Web API key before resolving a vanity URL.")
             self.owner_status_var.set("Workshop owner: needs API key")
@@ -1410,6 +1415,8 @@ class WorkshopUploader:
             self.steam_login_status_var.set(status)
         if hasattr(self, "auth_detail_var"):
             self.auth_detail_var.set(detail or default_detail)
+        if state == "steamcmd_unavailable" and hasattr(self, "access_advanced_frame"):
+            self._set_access_advanced(True)
         self._toggle_auth_fields()
 
     def _sync_steam_identity_from_local_state(self):
@@ -1671,6 +1678,7 @@ class WorkshopUploader:
             font=(self.current_font, 11, "bold"),
         ).pack(side="left")
         ttk.Label(summary_row, textvariable=self.owner_status_var, foreground=self.colors["accent"]).pack(side="left", padx=(16, 0))
+        ttk.Label(summary_row, textvariable=self.api_key_status_var, foreground="#ffff44").pack(side="left", padx=(16, 0))
         self.access_toggle_btn = ttk.Button(summary_row, text="SETUP / ADVANCED", command=self.toggle_access_advanced)
         self.access_toggle_btn.pack(side="right")
 
@@ -2211,6 +2219,9 @@ class WorkshopUploader:
         self.root.after(0, lambda: self._log_impl(msg))
 
     def _log_impl(self, msg):
+        summary = " ".join(str(msg or "").splitlines()).strip()
+        if hasattr(self, "activity_summary_var") and summary:
+            self.activity_summary_var.set(summary)
         if not hasattr(self, "log_box"):
             return
         self.log_box.config(state="normal")
