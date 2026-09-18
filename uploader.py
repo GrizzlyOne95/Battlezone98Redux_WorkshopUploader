@@ -1714,12 +1714,12 @@ class WorkshopUploader:
         ttk.Button(top_row, text="NEW ITEM", command=self.set_create_mode).pack(side="right")
         ttk.Button(top_row, text="OPEN PAGE", command=self.open_workshop_page).pack(side="right", padx=4)
 
-        ttk.Label(frame, text="Content Folder:").grid(row=1, column=0, sticky="w")
         ttk.Label(
-            frame,
-            text="Choose the content folder first; its local upload profile opens automatically.",
+            top_row,
+            text="Select a content folder first; its upload profile opens automatically.",
             foreground=self.colors["fg"],
-        ).grid(row=0, column=1, columnspan=3, sticky="w", pady=(0, 6))
+        ).pack(side="left", padx=(16, 0))
+        ttk.Label(frame, text="Content Folder:").grid(row=1, column=0, sticky="w")
         ttk.Entry(frame, textvariable=self.mod_path).grid(row=1, column=1, columnspan=3, sticky="ew", padx=5)
         path_btns = ttk.Frame(frame)
         path_btns.grid(row=2, column=1, columnspan=3, sticky="w", pady=(4, 8))
