@@ -20,9 +20,9 @@ Executable names are intentionally stable and versionless:
 
 Release archives carry the version and platform, for example:
 
-- `Battlezone98Redux_WorkshopUploader-v1.6-windows.zip`
-- `Battlezone98Redux_WorkshopUploader-v1.6-linux.tar.gz`
-- `Battlezone98Redux_WorkshopUploader-v1.6-macos.tar.gz`
+- `Battlezone98Redux_WorkshopUploader-v1.7.0-windows.zip`
+- `Battlezone98Redux_WorkshopUploader-v1.7.0-linux.tar.gz`
+- `Battlezone98Redux_WorkshopUploader-v1.7.0-macos.tar.gz`
 
 Official Windows builds use the shared **Battlezone Modding Tools** product identity:
 
