@@ -133,7 +133,7 @@ class TemplateWizard(tk.Toplevel):
     def __init__(self, parent, colors, on_success):
         super().__init__(parent)
         apply_window_icon(self)
-        self.title("New Project Wizard")
+        self.title("New Content Wizard")
         self.geometry("500x550")
         self.configure(bg=colors["bg"])
         self.colors = colors
@@ -158,10 +158,10 @@ class TemplateWizard(tk.Toplevel):
         frame = ttk.Frame(self, padding=20)
         frame.pack(fill="both", expand=True)
         
-        ttk.Label(frame, text="CREATE NEW BZR PROJECT", font=("Consolas", 14, "bold"), foreground=c["highlight"]).pack(pady=(0, 20))
+        ttk.Label(frame, text="CREATE NEW BZR CONTENT", font=("Consolas", 14, "bold"), foreground=c["highlight"]).pack(pady=(0, 20))
         
         # Name
-        ttk.Label(frame, text="Mission Name:").pack(anchor="w")
+        ttk.Label(frame, text="Content Name:").pack(anchor="w")
         ttk.Entry(frame, textvariable=self.name_var).pack(fill="x", pady=(0, 15))
         
         # Map Type
@@ -187,7 +187,7 @@ class TemplateWizard(tk.Toplevel):
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(fill="x", side="bottom", pady=20)
         
-        ttk.Button(btn_frame, text="CREATE PROJECT", command=self.create_project, style="Success.TButton").pack(side="right", padx=5)
+        ttk.Button(btn_frame, text="CREATE CONTENT", command=self.create_project, style="Success.TButton").pack(side="right", padx=5)
         ttk.Button(btn_frame, text="CANCEL", command=self.destroy).pack(side="right")
 
     def _toggle_mp_fields(self, event=None):
@@ -201,10 +201,10 @@ class TemplateWizard(tk.Toplevel):
     def create_project(self):
         name = self.name_var.get().strip()
         if not name:
-            messagebox.showerror("Error", "Project name cannot be empty.")
+            messagebox.showerror("Error", "Content name cannot be empty.")
             return
             
-        target_dir = filedialog.askdirectory(title="Select Parent Folder for New Project")
+        target_dir = filedialog.askdirectory(title="Select Parent Folder for New Content")
         if not target_dir: return
         
         project_path = os.path.join(target_dir, name)
@@ -254,7 +254,7 @@ gameType = "{g_type}"
             
             self.on_success(project_path)
             self.destroy()
-            messagebox.showinfo("Success", f"Project '{name}' created successfully!")
+            messagebox.showinfo("Success", f"Content '{name}' created successfully!")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to create project: {e}")
@@ -583,7 +583,7 @@ class WorkshopUploader:
             profile_path = self.project_store.save_project(payload)
         except Exception as e:
             if not quiet:
-                messagebox.showerror("Error", f"Failed to save project state: {e}")
+                messagebox.showerror("Error", f"Failed to save upload profile: {e}")
             return None
 
         self.current_project_profile_path = profile_path
@@ -634,9 +634,9 @@ class WorkshopUploader:
             self.manage_identity_var.set(data.get("manage_identity", self.manage_identity_var.get()))
         finally:
             self.autosave_suspended = False
-        self.project_name_var.set((data.get("project_name") or os.path.basename(data.get("mod_path", "")) or "NO PROJECT").upper())
+        self.project_name_var.set((data.get("project_name") or os.path.basename(data.get("mod_path", "")) or "NO UPLOAD PROFILE").upper())
         mod_path = data.get("mod_path", "")
-        self.project_hint_var.set(os.path.abspath(mod_path) if mod_path else "Saved project loaded.")
+        self.project_hint_var.set(os.path.abspath(mod_path) if mod_path else "Saved upload profile loaded.")
         self._update_project_status(self.current_inventory)
         self.refresh_recent_projects()
         return data
@@ -658,8 +658,11 @@ class WorkshopUploader:
         return True
 
     def _activate_content_folder(self, folder, quiet=False):
-        folder = os.path.abspath((folder or "").strip())
-        if not folder or not os.path.isdir(folder):
+        raw_folder = (folder or "").strip()
+        if not raw_folder:
+            return None
+        folder = os.path.abspath(raw_folder)
+        if not os.path.isdir(folder):
             if not quiet:
                 messagebox.showerror("Content Folder", "Select an existing content folder.")
             return None
@@ -1988,7 +1991,11 @@ class WorkshopUploader:
         return None
 
     def save_profile(self):
-        f = filedialog.asksaveasfilename(initialdir=self.profiles_dir, defaultextension=".json", filetypes=[("JSON Profile", "*.json")])
+        f = filedialog.asksaveasfilename(
+            initialdir=self.profiles_dir,
+            defaultextension=".json",
+            filetypes=[("Upload Profile", "*.json"), ("JSON Profile", "*.json")],
+        )
         if not f: return
         
         data = {
@@ -2639,7 +2646,7 @@ class WorkshopUploader:
                     self.update_workshop_tags(item_id_override=updated_item_id)
                 
                 self.root.after(0, self.refresh_current_project_readiness)
-                self.root.after(0, lambda: messagebox.showinfo("Success", "SteamCMD finished.\nProject state and publish snapshot were updated."))
+                self.root.after(0, lambda: messagebox.showinfo("Success", "SteamCMD finished.\nUpload profile and publish snapshot were updated."))
             else:
                 self.log(f"SteamCMD exited with code {p.returncode}")
                 
