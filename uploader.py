@@ -1618,7 +1618,7 @@ class WorkshopUploader:
 
         self.auth_row = ttk.Frame(frame)
         self.auth_row.grid(row=2, column=2, columnspan=2, sticky="w")
-        self.qr_btn = ttk.Button(self.auth_row, text="STEAM QR", command=self.start_qr_login)
+        self.qr_btn = ttk.Button(self.auth_row, text="QR VERIFY", command=self.start_qr_login)
         self.qr_btn.pack(side="left")
         self.cached_cb = ttk.Checkbutton(self.auth_row, text="USE CACHED LOGIN", variable=self.use_cached_creds_var)
         self.test_steam_login_btn = ttk.Button(self.auth_row, text="SIGN IN", command=self.test_steamcmd_login)
@@ -1888,6 +1888,11 @@ class WorkshopUploader:
             tail = "\n".join(output.splitlines()[-10:])
             state = result.get("state", "verified" if result.get("success") else "failed")
 
+            def apply_failure_state(value):
+                if use_cached:
+                    self.use_cached_creds_var.set(False)
+                self._set_auth_state(value)
+
             if result.get("success"):
                 def mark_verified():
                     self.use_cached_creds_var.set(True)
@@ -1897,19 +1902,19 @@ class WorkshopUploader:
                     self.log("SteamCMD login verified; cached login mode enabled.")
                 self.root.after(0, mark_verified)
             elif state == "guard_required":
-                self.root.after(0, lambda: self._set_auth_state("guard_required"))
+                self.root.after(0, lambda value="guard_required": apply_failure_state(value))
                 self.root.after(0, lambda: self.log("SteamCMD requires a Steam Guard code. Enter the code shown by Steam and retry."))
             elif state == "mobile_approval":
-                self.root.after(0, lambda: self._set_auth_state("mobile_approval"))
+                self.root.after(0, lambda value="mobile_approval": apply_failure_state(value))
                 self.root.after(0, lambda: self.log("SteamCMD is waiting for approval in the Steam mobile app."))
             elif state == "bad_credentials":
-                self.root.after(0, lambda: self._set_auth_state("bad_credentials"))
+                self.root.after(0, lambda value="bad_credentials": apply_failure_state(value))
                 self.root.after(0, lambda: self.log(f"SteamCMD rejected the supplied credentials.\n{tail}"))
             elif state == "timeout":
-                self.root.after(0, lambda: self._set_auth_state("timeout"))
+                self.root.after(0, lambda value="timeout": apply_failure_state(value))
                 self.root.after(0, lambda: self.log("SteamCMD authentication timed out while waiting for confirmation."))
             else:
-                self.root.after(0, lambda: self._set_auth_state("failed"))
+                self.root.after(0, lambda value="failed": apply_failure_state(value))
                 self.root.after(0, lambda: self.log(f"SteamCMD login check failed.\n{tail}"))
         except Exception as e:
             self.root.after(0, lambda: self._set_auth_state("failed"))
@@ -2258,7 +2263,7 @@ class WorkshopUploader:
         }
         show_manual = auth_state in manual_states and not self.use_cached_creds_var.get()
         show_guard = auth_state == "guard_required" and not self.use_cached_creds_var.get()
-        show_qr = auth_state in manual_states or auth_state in {"qr_pending", "mobile_approval"}
+        show_qr = auth_state in {"sign_in_required", "bad_credentials", "timeout", "failed", "qr_confirmed"}
 
         for widget in (self.user_label, self.user_entry, self.pwd_label, self.pwd_entry):
             if show_manual:
@@ -2295,6 +2300,8 @@ class WorkshopUploader:
                 pass
 
         self.qr_btn.config(state="disabled" if is_busy else "normal")
+        login_disabled = is_busy or auth_state in {"unknown", "steamcmd_unavailable", "checking", "qr_pending"}
+        self.test_steam_login_btn.config(state="disabled" if login_disabled else "normal")
 
     def _build_mod_inventory(self, mod_dir):
         return self._get_mod_scanner().build_inventory(mod_dir)
