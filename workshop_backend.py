@@ -137,10 +137,11 @@ class WorkshopBackend:
             try:
                 if process.stdout is None:
                     return
-                for line in iter(process.stdout.readline, ""):
-                    if not line:
+                while True:
+                    char = process.stdout.read(1)
+                    if not char:
                         break
-                    output_queue.put(line)
+                    output_queue.put(char)
             finally:
                 output_queue.put(None)
 
