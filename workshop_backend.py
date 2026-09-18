@@ -89,6 +89,8 @@ class WorkshopBackend:
 
         if any(marker in lower for marker in bad_password_markers):
             return "bad_credentials"
+        if timed_out and any(marker in lower for marker in mobile_markers):
+            return "timeout"
         if any(marker in lower for marker in mobile_markers):
             return "mobile_approval"
         if any(marker in lower for marker in guard_markers):
