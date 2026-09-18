@@ -1847,16 +1847,20 @@ class WorkshopUploader:
 
         if not exe or not os.path.exists(exe):
             self.steamcmd_status_var.set("SteamCMD: not found")
-            messagebox.showerror("SteamCMD Login", "Set a valid steamcmd.exe path first.")
+            self._set_auth_state("steamcmd_unavailable")
+            messagebox.showerror("SteamCMD Login", "Set a valid SteamCMD path first.")
             return False
 
         if not use_cached and (not user or not pwd):
-            self.steam_login_status_var.set("Steam login: needs username/password")
-            messagebox.showerror("SteamCMD Login", "Manual login testing needs both username and password. Use cached login if SteamCMD is already authenticated.")
+            self._set_auth_state("sign_in_required")
+            messagebox.showerror(
+                "SteamCMD Login",
+                "Enter your Steam username and password. Steam Guard will only be requested if Steam says it is needed.",
+            )
             return False
 
-        self.steam_login_status_var.set("Steam login: testing...")
-        self.log("Testing SteamCMD login...")
+        self._set_auth_state("checking")
+        self.log("Checking SteamCMD login...")
         self._set_busy("SteamCMD Login Test", True)
         threading.Thread(
             target=self._test_steamcmd_login_worker,
@@ -1866,6 +1870,10 @@ class WorkshopUploader:
         return True
 
     def _test_steamcmd_login_worker(self, exe, user, pwd, use_cached, guard_code):
+        def report_state(state):
+            if state in ("guard_required", "mobile_approval", "checking"):
+                self.root.after(0, lambda value=state: self._set_auth_state(value))
+
         try:
             result = self._get_workshop_backend().test_steamcmd_login(
                 exe=exe,
@@ -1873,24 +1881,42 @@ class WorkshopUploader:
                 pwd=pwd,
                 use_cached=use_cached,
                 guard_code=guard_code,
-                timeout=60,
+                timeout=180,
+                state_callback=report_state,
             )
             output = result.get("output", "")
-            tail = "\n".join(output.splitlines()[-8:])
+            tail = "\n".join(output.splitlines()[-10:])
+            state = result.get("state", "verified" if result.get("success") else "failed")
+
             if result.get("success"):
-                self.root.after(0, lambda: self.steam_login_status_var.set("Steam login: verified"))
-                self.root.after(0, lambda: self.log("SteamCMD login check passed."))
+                def mark_verified():
+                    self.use_cached_creds_var.set(True)
+                    self.password_var.set("")
+                    self.steam_guard_var.set("")
+                    self._set_auth_state("verified")
+                    self.log("SteamCMD login verified; cached login mode enabled.")
+                self.root.after(0, mark_verified)
+            elif state == "guard_required":
+                self.root.after(0, lambda: self._set_auth_state("guard_required"))
+                self.root.after(0, lambda: self.log("SteamCMD requires a Steam Guard code. Enter the code shown by Steam and retry."))
+            elif state == "mobile_approval":
+                self.root.after(0, lambda: self._set_auth_state("mobile_approval"))
+                self.root.after(0, lambda: self.log("SteamCMD is waiting for approval in the Steam mobile app."))
+            elif state == "bad_credentials":
+                self.root.after(0, lambda: self._set_auth_state("bad_credentials"))
+                self.root.after(0, lambda: self.log(f"SteamCMD rejected the supplied credentials.\n{tail}"))
+            elif state == "timeout":
+                self.root.after(0, lambda: self._set_auth_state("timeout"))
+                self.root.after(0, lambda: self.log("SteamCMD authentication timed out while waiting for confirmation."))
             else:
-                self.root.after(0, lambda: self.steam_login_status_var.set("Steam login: failed"))
+                self.root.after(0, lambda: self._set_auth_state("failed"))
                 self.root.after(0, lambda: self.log(f"SteamCMD login check failed.\n{tail}"))
-        except subprocess.TimeoutExpired:
-            self.root.after(0, lambda: self.steam_login_status_var.set("Steam login: timed out"))
-            self.root.after(0, lambda: self.log("SteamCMD login check timed out. If SteamCMD is prompting, complete a manual login in a console first."))
         except Exception as e:
-            self.root.after(0, lambda: self.steam_login_status_var.set("Steam login: failed"))
+            self.root.after(0, lambda: self._set_auth_state("failed"))
             self.root.after(0, lambda: self.log(f"SteamCMD login check failed: {e}"))
         finally:
             self._set_busy("SteamCMD Login Test", False)
+
 
     def resize_preview_image(self, image_path):
         try:
@@ -2088,7 +2114,7 @@ class WorkshopUploader:
 
             self.qr_session_id = client_id
             self.qr_request_id = request_id
-            self.steam_login_status_var.set("Steam login: QR pending")
+            self._set_auth_state("qr_pending")
             
             # Step 2: Show QR Window
             self.show_qr_window(challenge_url)
@@ -2192,7 +2218,7 @@ class WorkshopUploader:
         if account_name:
             self.username_var.set(account_name)
             
-        self.steam_login_status_var.set("Steam login: QR confirmed, SteamCMD not verified")
+        self._set_auth_state("qr_confirmed")
         messagebox.showinfo(
             "QR Confirmed",
             f"Steam QR confirmed for {account_name or 'this account'}.\n\n"
@@ -2213,7 +2239,7 @@ class WorkshopUploader:
         if hasattr(self, 'qr_win'):
             self.qr_win.destroy()
         if hasattr(self, "steam_login_status_var"):
-            self.steam_login_status_var.set("Steam login: QR cancelled")
+            self._set_auth_state("sign_in_required")
         self.log("QR Login cancelled.")
 
     def _toggle_auth_fields(self, *args):
