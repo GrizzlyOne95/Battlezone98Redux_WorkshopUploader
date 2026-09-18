@@ -2222,7 +2222,7 @@ class WorkshopUploader:
         messagebox.showinfo(
             "QR Confirmed",
             f"Steam QR confirmed for {account_name or 'this account'}.\n\n"
-            "This does not create SteamCMD cached credentials. Click TEST STEAMCMD LOGIN before publishing.",
+            "This confirms the Steam account only. Enter your SteamCMD credentials below to finish publishing sign-in.",
         )
         
         if hasattr(self, 'qr_win'):
