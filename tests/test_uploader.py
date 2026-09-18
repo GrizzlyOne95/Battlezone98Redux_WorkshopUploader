@@ -303,6 +303,37 @@ class TestWorkshopUploader(unittest.TestCase):
 
         self.assertEqual(cmd, ["steamcmd.exe", "+login", "tester", "secret", "abc123", "+quit"])
 
+    def test_workshop_backend_classifies_steam_guard_code_prompt(self):
+        state = self.uploader.workshop_backend.classify_steamcmd_login_output(
+            "Steam Guard code is required for this account."
+        )
+        self.assertEqual(state, "guard_required")
+
+    def test_workshop_backend_classifies_mobile_approval(self):
+        state = self.uploader.workshop_backend.classify_steamcmd_login_output(
+            "Use the Steam Mobile App to confirm your sign in."
+        )
+        self.assertEqual(state, "mobile_approval")
+
+    def test_workshop_backend_mobile_approval_timeout_is_timeout(self):
+        state = self.uploader.workshop_backend.classify_steamcmd_login_output(
+            "Use the Steam Mobile App to confirm your sign in.",
+            timed_out=True,
+        )
+        self.assertEqual(state, "timeout")
+
+    def test_workshop_backend_classifies_bad_credentials(self):
+        state = self.uploader.workshop_backend.classify_steamcmd_login_output(
+            "FAILED (Invalid Password)"
+        )
+        self.assertEqual(state, "bad_credentials")
+
+    def test_workshop_backend_classifies_successful_login(self):
+        state = self.uploader.workshop_backend.classify_steamcmd_login_output(
+            "Logging in user 'tester' to Steam Public...Logged in OK"
+        )
+        self.assertEqual(state, "verified")
+
     def test_workshop_backend_prefers_native_steamworks_tag_update(self):
         updater = MagicMock()
         updater.try_update_tags.return_value = {"method": "steamworks", "publishedfileid": "123"}
@@ -660,6 +691,29 @@ class TestWorkshopUploader(unittest.TestCase):
 
         second = self.uploader._fingerprint_inventory(self.uploader._build_mod_inventory(self.test_dir))
         self.assertNotEqual(first, second)
+
+    def test_auth_state_guard_required_reveals_guard_field(self):
+        self.uploader.use_cached_creds_var.set(False)
+        self.uploader.guard_label.reset_mock()
+        self.uploader.guard_entry.reset_mock()
+
+        self.uploader._set_auth_state("guard_required")
+
+        self.uploader.guard_label.grid.assert_called()
+        self.uploader.guard_entry.grid.assert_called()
+        self.assertIn("Guard", self.uploader.steam_login_status_var.get())
+
+    def test_auth_state_cached_ready_hides_manual_credentials(self):
+        self.uploader.use_cached_creds_var.set(True)
+        self.uploader.user_entry.reset_mock()
+        self.uploader.pwd_entry.reset_mock()
+        self.uploader.guard_entry.reset_mock()
+
+        self.uploader._set_auth_state("cached_ready")
+
+        self.uploader.user_entry.grid_remove.assert_called()
+        self.uploader.pwd_entry.grid_remove.assert_called()
+        self.uploader.guard_entry.grid_remove.assert_called()
 
     def test_steam_service_detects_configured_steamcmd_first(self):
         steamcmd_dir = os.path.join(self.test_dir, "steamcmd")
