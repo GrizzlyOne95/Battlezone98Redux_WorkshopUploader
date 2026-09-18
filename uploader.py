@@ -1657,62 +1657,107 @@ class WorkshopUploader:
         self.tree.bind("<Double-1>", lambda _e: self.prepare_update())
 
     def setup_access_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" 1. ACCESS SETUP ", padding=10)
+        frame = ttk.LabelFrame(parent, text=" STEAM CONNECTION ", padding=10)
         frame.pack(fill="x", pady=(0, 10))
         frame.columnconfigure(1, weight=3)
         frame.columnconfigure(3, weight=2)
 
-        ttk.Label(frame, text="SteamCMD Path:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=self.steamcmd_path).grid(row=0, column=1, sticky="ew", padx=5)
-        path_actions = ttk.Frame(frame)
-        path_actions.grid(row=0, column=2, columnspan=2, sticky="e")
-        ttk.Button(path_actions, text="BROWSE", command=self.browse_steamcmd).pack(side="left")
-        ttk.Button(path_actions, text="AUTO-DL", command=self.download_steamcmd).pack(side="left", padx=(5, 0))
+        summary_row = ttk.Frame(frame)
+        summary_row.grid(row=0, column=0, columnspan=4, sticky="ew")
+        ttk.Label(
+            summary_row,
+            textvariable=self.steam_login_status_var,
+            foreground=self.colors["highlight"],
+            font=(self.current_font, 11, "bold"),
+        ).pack(side="left")
+        ttk.Label(summary_row, textvariable=self.owner_status_var, foreground=self.colors["accent"]).pack(side="left", padx=(16, 0))
+        self.access_toggle_btn = ttk.Button(summary_row, text="SETUP / ADVANCED", command=self.toggle_access_advanced)
+        self.access_toggle_btn.pack(side="right")
+
+        ttk.Label(
+            frame,
+            textvariable=self.auth_detail_var,
+            foreground="#ffcc66",
+            wraplength=620,
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 4))
 
         self.user_label = ttk.Label(frame, text="Steam Username:")
-        self.user_label.grid(row=1, column=0, sticky="w", pady=5)
+        self.user_label.grid(row=2, column=0, sticky="w", pady=5)
         self.user_entry = ttk.Entry(frame, textvariable=self.username_var)
-        self.user_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+        self.user_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
 
         self.pwd_label = ttk.Label(frame, text="Password:")
-        self.pwd_label.grid(row=1, column=2, sticky="e", pady=5)
+        self.pwd_label.grid(row=2, column=2, sticky="e", pady=5)
         self.pwd_entry = ttk.Entry(frame, textvariable=self.password_var, show="*")
-        self.pwd_entry.grid(row=1, column=3, sticky="ew", padx=(5, 0), pady=5)
+        self.pwd_entry.grid(row=2, column=3, sticky="ew", padx=(5, 0), pady=5)
 
         self.guard_label = ttk.Label(frame, text="Steam Guard Code:")
-        self.guard_label.grid(row=2, column=0, sticky="w")
+        self.guard_label.grid(row=3, column=0, sticky="w")
         self.guard_entry = ttk.Entry(frame, textvariable=self.steam_guard_var, width=12)
-        self.guard_entry.grid(row=2, column=1, sticky="w", padx=5)
+        self.guard_entry.grid(row=3, column=1, sticky="w", padx=5)
 
         self.auth_row = ttk.Frame(frame)
-        self.auth_row.grid(row=2, column=2, columnspan=2, sticky="w")
+        self.auth_row.grid(row=3, column=2, columnspan=2, sticky="w")
         self.qr_btn = ttk.Button(self.auth_row, text="QR VERIFY", command=self.start_qr_login)
         self.qr_btn.pack(side="left")
         self.cached_cb = ttk.Checkbutton(self.auth_row, text="USE CACHED LOGIN", variable=self.use_cached_creds_var)
         self.test_steam_login_btn = ttk.Button(self.auth_row, text="SIGN IN", command=self.test_steamcmd_login)
         self.test_steam_login_btn.pack(side="left", padx=(5, 0))
 
-        ttk.Label(frame, textvariable=self.auth_detail_var, foreground="#ffcc66", wraplength=620).grid(
-            row=3, column=0, columnspan=4, sticky="w", pady=(4, 2)
+        self.access_advanced_frame = ttk.LabelFrame(frame, text=" ADVANCED STEAM SETTINGS ", padding=8)
+        self.access_advanced_frame.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        self.access_advanced_frame.columnconfigure(1, weight=3)
+        self.access_advanced_frame.columnconfigure(3, weight=2)
+
+        ttk.Label(self.access_advanced_frame, text="SteamCMD Path:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(self.access_advanced_frame, textvariable=self.steamcmd_path).grid(row=0, column=1, sticky="ew", padx=5)
+        path_actions = ttk.Frame(self.access_advanced_frame)
+        path_actions.grid(row=0, column=2, columnspan=2, sticky="e")
+        ttk.Button(path_actions, text="BROWSE", command=self.browse_steamcmd).pack(side="left")
+        ttk.Button(path_actions, text="AUTO-DL", command=self.download_steamcmd).pack(side="left", padx=(5, 0))
+
+        ttk.Label(self.access_advanced_frame, text="Steam Web API Key:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(self.access_advanced_frame, textvariable=self.api_key_var, show="*").grid(row=1, column=1, sticky="ew", padx=5, pady=(6, 0))
+        ttk.Button(self.access_advanced_frame, text="?", command=self.open_api_key_link, width=3).grid(row=1, column=2, sticky="w", padx=(0, 5), pady=(6, 0))
+        self.test_api_key_btn = ttk.Button(self.access_advanced_frame, text="TEST KEY", command=self.test_api_key)
+        self.test_api_key_btn.grid(row=1, column=3, sticky="w", pady=(6, 0))
+
+        native_appid_cb = ttk.Checkbutton(
+            self.access_advanced_frame,
+            text="NATIVE TAGS VIA steam_appid.txt",
+            variable=self.experimental_native_appid_var,
         )
+        native_appid_cb.grid(row=2, column=1, columnspan=3, sticky="w", pady=(5, 0))
 
-        ttk.Label(frame, text="Steam Web API Key:").grid(row=4, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(frame, textvariable=self.api_key_var, show="*").grid(row=4, column=1, sticky="ew", padx=5, pady=(5, 0))
-        ttk.Button(frame, text="?", command=self.open_api_key_link, width=3).grid(row=4, column=2, sticky="w", padx=(0, 5), pady=(5, 0))
-        self.test_api_key_btn = ttk.Button(frame, text="TEST KEY", command=self.test_api_key)
-        self.test_api_key_btn.grid(row=4, column=3, sticky="w", pady=(5, 0))
-        native_appid_cb = ttk.Checkbutton(frame, text="NATIVE TAGS VIA steam_appid.txt", variable=self.experimental_native_appid_var)
-        native_appid_cb.grid(row=5, column=1, columnspan=3, sticky="w", pady=(5, 0))
+        diagnostics = ttk.Frame(self.access_advanced_frame)
+        diagnostics.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ttk.Label(diagnostics, textvariable=self.steamcmd_status_var, foreground="#ffff44").pack(side="left", padx=(0, 18))
+        ttk.Label(diagnostics, textvariable=self.api_key_status_var, foreground="#ffff44").pack(side="left", padx=(0, 18))
+        ttk.Button(diagnostics, text="STEAM LOGS", command=self.show_steam_logs).pack(side="right")
 
-        status_row = ttk.Frame(frame)
-        status_row.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-        for status_var in (
-            self.steamcmd_status_var,
-            self.steam_login_status_var,
-            self.api_key_status_var,
-            self.owner_status_var,
-        ):
-            ttk.Label(status_row, textvariable=status_var, foreground="#ffff44").pack(side="left", padx=(0, 18))
+        self._set_access_advanced(False)
+
+    def _set_access_advanced(self, expanded):
+        self.access_advanced_expanded = bool(expanded)
+        frame = getattr(self, "access_advanced_frame", None)
+        if frame is not None:
+            try:
+                if self.access_advanced_expanded:
+                    frame.grid()
+                else:
+                    frame.grid_remove()
+            except Exception:
+                pass
+        button = getattr(self, "access_toggle_btn", None)
+        if button is not None:
+            try:
+                button.config(text="HIDE ADVANCED" if self.access_advanced_expanded else "SETUP / ADVANCED")
+            except Exception:
+                pass
+
+    def toggle_access_advanced(self):
+        self._set_access_advanced(not self.access_advanced_expanded)
+
 
     def setup_editor_panel(self, parent):
         frame = ttk.LabelFrame(parent, text=" WORKSHOP ITEM EDITOR ", padding=10)
