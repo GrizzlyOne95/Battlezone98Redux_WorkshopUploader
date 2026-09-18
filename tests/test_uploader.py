@@ -443,6 +443,111 @@ class TestWorkshopUploader(unittest.TestCase):
 
         self.assertEqual(loaded, payload)
 
+    def test_activate_content_folder_creates_local_upload_profile(self):
+        profiles_dir = os.path.join(self.test_dir, "profiles")
+        self.uploader.project_store = ProjectStore(profiles_dir, AppFileManager())
+        content_dir = os.path.join(self.test_dir, "CampaignReimagined")
+        os.makedirs(content_dir, exist_ok=True)
+
+        self.uploader.mod_path = DummyVar("")
+        self.uploader.preview_path = DummyVar("old-preview.jpg")
+        self.uploader.title_var = DummyVar("Old Title")
+        self.uploader.visibility_var = DummyVar("2 (Private)")
+        self.uploader.item_id_var = DummyVar("999")
+        self.uploader.note_var = DummyVar("old note")
+        self.uploader.tags_var = DummyVar("OldTag")
+        self.uploader.manage_identity_var = DummyVar("76561198000000001")
+        self.uploader.project_name_var = DummyVar("")
+        self.uploader.project_hint_var = DummyVar("")
+        self.uploader.desc_text = MagicMock()
+        self.uploader.desc_text.get.return_value = ""
+        self.uploader.refresh_current_project_readiness = MagicMock()
+        self.uploader.refresh_recent_projects = MagicMock()
+        self.uploader.current_project_profile_path = ""
+        self.uploader.current_project_data = {}
+
+        result = self.uploader._activate_content_folder(content_dir, quiet=True)
+
+        self.assertEqual(result, "created")
+        self.assertEqual(self.uploader.mod_path.get(), os.path.abspath(content_dir))
+        self.assertEqual(self.uploader.title_var.get(), "CampaignReimagined")
+        self.assertEqual(self.uploader.item_id_var.get(), "0")
+        self.assertEqual(self.uploader.preview_path.get(), "")
+        saved = self.uploader.project_store.find_by_mod_path(content_dir)
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved["item_id"], "0")
+        self.assertEqual(saved["title"], "CampaignReimagined")
+
+    def test_activate_content_folder_opens_existing_upload_profile(self):
+        profiles_dir = os.path.join(self.test_dir, "profiles")
+        self.uploader.project_store = ProjectStore(profiles_dir, AppFileManager())
+        content_dir = os.path.join(self.test_dir, "ExistingMod")
+        os.makedirs(content_dir, exist_ok=True)
+        self.uploader.project_store.save_project({
+            "project_name": "ExistingMod",
+            "mod_path": content_dir,
+            "preview_path": "preview.jpg",
+            "title": "Existing Workshop Title",
+            "description": "Existing description",
+            "visibility": "1 (Friends)",
+            "item_id": "123456",
+            "change_note": "Update",
+            "tags": "Map",
+        })
+
+        self.uploader.mod_path = DummyVar("")
+        self.uploader.preview_path = DummyVar("")
+        self.uploader.title_var = DummyVar("")
+        self.uploader.visibility_var = DummyVar("0 (Public)")
+        self.uploader.item_id_var = DummyVar("0")
+        self.uploader.note_var = DummyVar("")
+        self.uploader.tags_var = DummyVar("")
+        self.uploader.manage_identity_var = DummyVar("")
+        self.uploader.project_name_var = DummyVar("")
+        self.uploader.project_hint_var = DummyVar("")
+        self.uploader.publish_target_var = DummyVar("")
+        self.uploader.last_upload_var = DummyVar("")
+        self.uploader.changed_since_upload_var = DummyVar("")
+        self.uploader.desc_text = MagicMock()
+        self.uploader.refresh_current_project_readiness = MagicMock()
+        self.uploader.refresh_recent_projects = MagicMock()
+        self.uploader.current_project_profile_path = ""
+        self.uploader.current_project_data = {}
+
+        result = self.uploader._activate_content_folder(content_dir, quiet=True)
+
+        self.assertEqual(result, "opened")
+        self.assertEqual(self.uploader.title_var.get(), "Existing Workshop Title")
+        self.assertEqual(self.uploader.item_id_var.get(), "123456")
+        self.assertEqual(self.uploader.visibility_var.get(), "1 (Friends)")
+
+    def test_use_workshop_item_requires_content_folder_first(self):
+        self.uploader.mod_path = DummyVar("")
+        self.uploader.item_id_var = DummyVar("0")
+        self.uploader.tree = MagicMock()
+        self.uploader.tree.selection.return_value = ["item1"]
+        self.uploader.tree.item.return_value = {"values": ["My Item", "123"]}
+
+        ok = self.uploader.use_selected_item_id_for_upload(quiet=False)
+
+        self.assertFalse(ok)
+        self.assertEqual(self.uploader.item_id_var.get(), "0")
+        uploader.messagebox.showinfo.assert_called()
+
+    def test_item_indicator_infers_new_or_existing_from_workshop_id(self):
+        self.uploader.item_id_var = DummyVar("0")
+        self.uploader.publish_target_var = DummyVar("")
+        self.uploader.upload_mode_label = MagicMock()
+
+        self.uploader._update_upload_mode_indicator()
+        self.assertEqual(self.uploader.publish_target_var.get(), "WORKSHOP ITEM: NEW")
+        self.assertEqual(self.uploader.upload_mode_label.config.call_args.kwargs["text"], "NEW WORKSHOP ITEM")
+
+        self.uploader.item_id_var.set("987654")
+        self.uploader._update_upload_mode_indicator()
+        self.assertEqual(self.uploader.publish_target_var.get(), "WORKSHOP ITEM: #987654")
+        self.assertEqual(self.uploader.upload_mode_label.config.call_args.kwargs["text"], "WORKSHOP ITEM #987654")
+
     def test_project_store_round_trip_by_mod_path(self):
         manager = AppFileManager()
         store = ProjectStore(os.path.join(self.test_dir, "profiles"), manager)
