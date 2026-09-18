@@ -2,11 +2,12 @@
 
 A desktop GUI for creating, updating, and validating Steam Workshop mods for **Battlezone 98 Redux**.
 
-This tool is built around a project-centric workflow:
-- pair a local mod folder to a Workshop item
-- scan the folder for common Battlezone content issues
-- review what changed since the last publish
-- publish through SteamCMD with better logging and recovery than the legacy uploader
+This tool is built around a folder-driven Workshop workflow:
+- auto-detect SteamCMD and reuse a cached Steam login when available
+- open or create a local upload profile by selecting a content folder
+- load the complete set of owned Workshop items and explicitly link an existing item when needed
+- scan the folder for common Battlezone content issues and review what changed since the last publish
+- publish through SteamCMD with adaptive Steam Guard/mobile-approval handling and expandable diagnostics
 
 ## Release Builds
 
@@ -52,28 +53,30 @@ python uploader.py
 
 Then use the workspace like this:
 
-1. Configure `steamcmd.exe`, login method, and optional Steam Web API key.
-2. Select or create a local mod project folder.
-3. Pair the project to an existing Workshop item from the **Workshop Library** panel, or leave it unpaired to create a new item.
-4. Fill in preview, title, description, visibility, tags, and change note.
-5. Review findings in the **Readiness** panel.
-6. Open files, apply selected fixes, apply all one-click fixes, or inspect changed files since the last publish snapshot.
-7. Click `REVIEW AND PUBLISH`.
+1. Launch the uploader. SteamCMD, cached Steam authentication, and the Workshop owner are detected automatically when possible.
+2. Select a content folder. Its **Local Upload Profile** opens automatically, or a new one is created for that folder.
+3. To update an existing item, choose it from **Your Workshop Items** and click **USE ITEM** or **LOAD ITEM**. Leave the profile unlinked to create a new item.
+4. Fill in preview, title, description, visibility, tags, and change note in the **Workshop Item Editor**.
+5. Review **Readiness**. Clean content stays compact; warnings and fixable/blocking issues expand automatically.
+6. Click `REVIEW AND PUBLISH`. Steam Guard fields or mobile-approval prompts appear only if Steam requires them.
+7. Use **SETUP / ADVANCED** or **SHOW LOG** only when manual setup or diagnostics are needed.
 
 ## Main Features
 
-### Project Workspace
+### Local Upload Profiles
 
-- Saved local projects under `profiles/`
-- Automatic project autosave while editing
-- Persistent Workshop pairing by local mod folder
+- One saved local upload profile per content folder under `profiles/`
+- Folder selection automatically opens or creates the corresponding profile
+- Automatic profile autosave while editing
+- Persistent Workshop-item association by local content folder
 - Last publish timestamp and changed-file tracking
 
-### Workshop Library
+### Your Workshop Items
 
-- Load your Workshop items through the Steam Web API
-- Pair the current local project to a selected Workshop item
-- Import Workshop details such as title, description, visibility, preview, and tags into the workspace
+- Automatically refresh the owner's Workshop library when identity/API access is available
+- Enumerate all owned items across Steam API pages instead of stopping at the first page
+- Explicitly link the current upload profile to a selected Workshop item
+- Load Workshop details such as title, description, visibility, preview, and tags into the editor
 
 ### Safety And Validation
 
@@ -93,10 +96,12 @@ Then use the workspace like this:
 
 ### Publishing
 
+- Automatic SteamCMD discovery with manual Browse/Auto-DL fallback
+- Cached SteamCMD login detection with manual sign-in only when needed
+- Adaptive Steam Guard code and Steam mobile-approval states
+- QR account-verification helper
 - SteamCMD VDF generation
-- Cached credential mode or manual login
-- QR login helper
-- Upload log inspection
+- Expandable Steam/upload diagnostics rather than an always-visible raw log
 - Experimental Workshop tag updates after successful publish
 
 ### Analysis
@@ -121,12 +126,12 @@ pip install -r requirements.txt
 ## Files Used By The App
 
 - `uploader.py`: main application
-- `project_store.py`: saved project persistence
+- `project_store.py`: saved local upload-profile persistence
 - `mod_scanner.py`: content scanning and validation
 - `memory_analyzer.py`: texture/orphan analysis
 - `workshop_backend.py`: SteamCMD and Workshop API interactions
 - `upload_preflight.py`: upload validation and VDF writing
-- `profiles/`: saved local project state
+- `profiles/`: saved local upload-profile state
 
 ## Notes
 
