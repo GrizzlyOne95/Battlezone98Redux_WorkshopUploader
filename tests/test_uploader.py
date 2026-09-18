@@ -902,12 +902,14 @@ class TestWorkshopUploader(unittest.TestCase):
         self.uploader.user_entry.reset_mock()
         self.uploader.pwd_entry.reset_mock()
         self.uploader.guard_entry.reset_mock()
+        self.uploader.auth_row.reset_mock()
 
         self.uploader._set_auth_state("cached_ready")
 
         self.uploader.user_entry.grid_remove.assert_called()
         self.uploader.pwd_entry.grid_remove.assert_called()
         self.uploader.guard_entry.grid_remove.assert_called()
+        self.uploader.auth_row.grid_remove.assert_called()
 
     def test_steam_service_detects_configured_steamcmd_first(self):
         steamcmd_dir = os.path.join(self.test_dir, "steamcmd")
