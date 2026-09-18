@@ -657,10 +657,48 @@ class WorkshopUploader:
         self.log(f"Opened local upload profile: {os.path.basename(tags[0])}")
         return True
 
-    def _handle_new_project_created(self, project_path):
-        self.mod_path.set(project_path)
+    def _activate_content_folder(self, folder, quiet=False):
+        folder = os.path.abspath((folder or "").strip())
+        if not folder or not os.path.isdir(folder):
+            if not quiet:
+                messagebox.showerror("Content Folder", "Select an existing content folder.")
+            return None
+
+        matched = self.project_store.find_by_mod_path(folder)
+        if matched:
+            self._load_project_from_path(matched["profile_path"])
+            self.refresh_current_project_readiness()
+            if not quiet:
+                self.log(f"Opened upload profile for: {folder}")
+            return "opened"
+
+        folder_name = os.path.basename(folder.rstrip("\\/")) or "Workshop Item"
+        self.autosave_suspended = True
+        try:
+            self.current_project_profile_path = ""
+            self.current_project_data = {}
+            self.current_inventory = []
+            self.current_findings = None
+            self.current_readiness = None
+            self.mod_path.set(folder)
+            self.preview_path.set("")
+            self.title_var.set(folder_name)
+            self._set_desc_text_value("")
+            self.visibility_var.set("0 (Public)")
+            self.item_id_var.set("0")
+            self.note_var.set("Initial Release")
+            self.tags_var.set("")
+        finally:
+            self.autosave_suspended = False
+
+        profile_path = self.save_current_project_state(quiet=True)
         self.refresh_current_project_readiness()
-        self.save_current_project_state(quiet=True)
+        if not quiet and profile_path:
+            self.log(f"Created local upload profile for: {folder}")
+        return "created" if profile_path else None
+
+    def _handle_new_project_created(self, project_path):
+        self._activate_content_folder(project_path, quiet=True)
 
     def _on_mod_path_changed(self, *args):
         mod_path = self.mod_path.get().strip()
@@ -676,10 +714,19 @@ class WorkshopUploader:
             self._load_project_from_path(matched["profile_path"])
             return
 
-        project_name = os.path.basename(mod_path.rstrip("\\/")) or "project"
+        current_mod_path = (self.current_project_data or {}).get("mod_path", "")
+        if current_mod_path:
+            current_key = os.path.normcase(os.path.abspath(current_mod_path))
+            next_key = os.path.normcase(os.path.abspath(mod_path))
+            if current_key != next_key:
+                self.current_project_profile_path = ""
+                self.current_project_data = {}
+
+        project_name = os.path.basename(mod_path.rstrip("\\/")) or "profile"
         self.project_name_var.set(project_name.upper())
         self.project_hint_var.set(os.path.abspath(mod_path))
-        self.current_project_profile_path = self.current_project_profile_path or self.project_store._profile_path_for_mod(mod_path)
+        if not self.current_project_profile_path:
+            self.current_project_profile_path = self.project_store._profile_path_for_mod(mod_path)
         if hasattr(self, "readiness_tree"):
             self.refresh_current_project_readiness()
 
@@ -1962,25 +2009,40 @@ class WorkshopUploader:
             messagebox.showerror("Error", f"Failed to save profile: {e}")
 
     def load_profile(self):
-        f = filedialog.askopenfilename(initialdir=self.profiles_dir, filetypes=[("JSON Profile", "*.json")])
-        if not f: return
-        
+        f = filedialog.askopenfilename(
+            initialdir=self.profiles_dir,
+            filetypes=[("Upload Profile", "*.json"), ("JSON Profile", "*.json")],
+        )
+        if not f:
+            return
+
         try:
             data = self._get_file_manager().load_profile(f)
-            self.mod_path.set(data.get("mod_path", ""))
-            self.preview_path.set(data.get("preview_path", ""))
-            self.title_var.set(data.get("title", ""))
-            self._set_desc_text_value(data.get("description", ""))
-            self.visibility_var.set(self._normalize_visibility_value(data.get("visibility", "0 (Public)")))
-            self.item_id_var.set(data.get("item_id", "0"))
-            self.note_var.set(data.get("change_note", ""))
-            self.tags_var.set(data.get("tags", ""))
-            self.current_project_profile_path = f if os.path.dirname(os.path.abspath(f)) == os.path.abspath(self.profiles_dir) else ""
-            self.current_project_data = data
+            mod_path = (data.get("mod_path") or "").strip()
+            self.autosave_suspended = True
+            try:
+                self.current_project_profile_path = ""
+                self.current_project_data = {}
+                self.mod_path.set(mod_path)
+                self.preview_path.set(data.get("preview_path", ""))
+                self.title_var.set(data.get("title", ""))
+                self._set_desc_text_value(data.get("description", ""))
+                self.visibility_var.set(self._normalize_visibility_value(data.get("visibility", "0 (Public)")))
+                self.item_id_var.set(data.get("item_id", "0"))
+                self.note_var.set(data.get("change_note", ""))
+                self.tags_var.set(data.get("tags", ""))
+                self.manage_identity_var.set(data.get("manage_identity", self.manage_identity_var.get()))
+            finally:
+                self.autosave_suspended = False
+
+            if mod_path:
+                self.current_project_data = data
+                self.current_project_profile_path = self.project_store._profile_path_for_mod(mod_path)
+                self.save_current_project_state(quiet=True)
             self.refresh_current_project_readiness()
-            self.log(f"Profile loaded: {os.path.basename(f)}")
+            self.log(f"Imported upload profile: {os.path.basename(f)}")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load profile: {e}")
+            messagebox.showerror("Error", f"Failed to import upload profile: {e}")
 
     def log(self, msg):
         self.root.after(0, lambda: self._log_impl(msg))
@@ -2084,10 +2146,10 @@ class WorkshopUploader:
             time.sleep(3)
 
     def browse_content(self):
-        d = filedialog.askdirectory()
-        if d:
-            self.mod_path.set(d)
-            self.refresh_current_project_readiness()
+        d = filedialog.askdirectory(title="Select Workshop Content Folder")
+        if not d:
+            return None
+        return self._activate_content_folder(d)
 
     def browse_preview(self):
         f = filedialog.askopenfilename(filetypes=[("Images", "*.jpg;*.png;*.jpeg")])
@@ -2605,6 +2667,15 @@ class WorkshopUploader:
         self.use_selected_item_id_for_upload(switch_to_upload=False, quiet=True)
 
     def use_selected_item_id_for_upload(self, switch_to_upload=True, quiet=False):
+        mod_path = self.mod_path.get().strip()
+        if not mod_path or not os.path.isdir(mod_path):
+            if not quiet:
+                messagebox.showinfo(
+                    "Content Folder",
+                    "Select a content folder first. Its local upload profile will be created or opened automatically.",
+                )
+            return False
+
         selected = self.tree.selection()
         if not selected:
             if not quiet:
@@ -2787,7 +2858,8 @@ class WorkshopUploader:
         if not item_id or not str(item_id).isdigit():
             messagebox.showinfo("Info", "Select a Workshop item first.")
             return
-        self.use_selected_item_id_for_upload(switch_to_upload=False, quiet=True)
+        if not self.use_selected_item_id_for_upload(switch_to_upload=False, quiet=False):
+            return
         self.log(f"Fetching details for item {item_id}...")
         self._set_busy("Prepare Update", True)
         threading.Thread(target=self._prepare_update_worker, args=(item_id,), daemon=True).start()
