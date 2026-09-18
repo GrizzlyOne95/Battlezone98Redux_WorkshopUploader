@@ -1815,7 +1815,7 @@ class WorkshopUploader:
         self.title_char_label.grid(row=4, column=3, sticky="w")
 
         ttk.Label(frame, text="Description:").grid(row=5, column=0, sticky="nw", pady=5)
-        self.desc_text = tk.Text(frame, height=8, bg="#1a1a1a", fg=self.colors["accent"], insertbackground=self.colors["highlight"], font=("Consolas", 10))
+        self.desc_text = tk.Text(frame, height=6, bg="#1a1a1a", fg=self.colors["accent"], insertbackground=self.colors["highlight"], font=("Consolas", 10))
         self.desc_text.grid(row=5, column=1, columnspan=3, sticky="nsew", padx=5, pady=5)
         self.desc_text.bind("<KeyRelease>", self._on_description_changed)
 
@@ -1834,7 +1834,7 @@ class WorkshopUploader:
         ttk.Entry(frame, textvariable=self.tags_var).grid(row=9, column=1, columnspan=3, sticky="ew", padx=5)
 
         actions = ttk.Frame(frame)
-        actions.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        actions.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         self.upload_btn = ttk.Button(actions, text="REVIEW AND PUBLISH", command=self.start_upload, style="Success.TButton")
         self.upload_btn.pack(side="left", fill="x", expand=True, ipady=6)
 
