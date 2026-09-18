@@ -330,6 +330,8 @@ class WorkshopUploader:
         self.busy_status_var = tk.StringVar(value="STATUS: IDLE")
         self.steamcmd_status_var = tk.StringVar(value="SteamCMD: not checked")
         self.steam_login_status_var = tk.StringVar(value="Steam login: not checked")
+        self.auth_detail_var = tk.StringVar(value="Checking Steam authentication state...")
+        self.auth_state = "unknown"
         self.api_key_status_var = tk.StringVar(value="API key: not checked")
         self.owner_status_var = tk.StringVar(value="Workshop owner: not resolved")
         self._active_operations = set()
@@ -1323,10 +1325,34 @@ class WorkshopUploader:
         else:
             self.steamcmd_status_var.set("SteamCMD: not found")
 
+    def _set_auth_state(self, state, detail=""):
+        self.auth_state = state
+        messages = {
+            "unknown": ("Steam login: not checked", "Checking Steam authentication state..."),
+            "steamcmd_unavailable": ("Steam login: SteamCMD unavailable", "Install or select SteamCMD before signing in."),
+            "cached_ready": ("Steam login: cached session detected", "SteamCMD already has a cached login. Manual credentials are hidden."),
+            "sign_in_required": ("Steam login: sign-in required", "SteamCMD has no cached login. Enter your Steam credentials, or use Steam QR to verify the account."),
+            "checking": ("Steam login: checking...", "Checking SteamCMD authentication..."),
+            "guard_required": ("Steam login: Steam Guard code required", "Enter the current Steam Guard code, then retry sign-in."),
+            "mobile_approval": ("Steam login: waiting for Steam app approval", "Approve the sign-in in the Steam mobile app. This check continues automatically."),
+            "verified": ("Steam login: verified", "SteamCMD authentication succeeded."),
+            "bad_credentials": ("Steam login: credentials rejected", "Steam rejected the username/password. Correct them and try again."),
+            "timeout": ("Steam login: confirmation timed out", "SteamCMD did not finish authentication. Retry and approve any Steam Guard request when prompted."),
+            "failed": ("Steam login: failed", "SteamCMD authentication failed. Check the activity log for the SteamCMD response."),
+            "qr_pending": ("Steam login: QR pending", "Scan the QR code with the Steam mobile app."),
+            "qr_confirmed": ("Steam login: QR account confirmed", "QR confirmed the Steam account, but SteamCMD still needs its own cached or credentialed sign-in."),
+        }
+        status, default_detail = messages.get(state, messages["unknown"])
+        if hasattr(self, "steam_login_status_var"):
+            self.steam_login_status_var.set(status)
+        if hasattr(self, "auth_detail_var"):
+            self.auth_detail_var.set(detail or default_detail)
+        self._toggle_auth_fields()
+
     def _sync_steam_identity_from_local_state(self):
         exe = self.steamcmd_path.get().strip()
         if not exe or not os.path.exists(exe):
-            self.steam_login_status_var.set("Steam login: SteamCMD unavailable")
+            self._set_auth_state("steamcmd_unavailable")
             return None
 
         cached = self._get_steam_service().detect_cached_steamcmd_identity(exe)
@@ -1337,7 +1363,7 @@ class WorkshopUploader:
             if not self.manage_identity_var.get().strip():
                 self.manage_identity_var.set(cached["steamid"])
             display_name = cached.get("persona_name") or cached.get("account_name") or cached["steamid"]
-            self.steam_login_status_var.set(f"Steam login: cached {display_name}")
+            self._set_auth_state("cached_ready", f"SteamCMD cached login detected for {display_name}.")
             self.owner_status_var.set(f"Workshop owner: {cached['steamid']}")
             self.log(f"Detected cached SteamCMD login: {display_name} ({cached['steamid']})")
             return cached
@@ -1351,11 +1377,11 @@ class WorkshopUploader:
                 self.manage_identity_var.set(local_account["steamid"])
             display_name = local_account.get("persona_name") or local_account.get("account_name") or local_account["steamid"]
             self.owner_status_var.set(f"Workshop owner: {local_account['steamid']}")
-            self.steam_login_status_var.set(f"Steam login: sign-in required ({display_name} detected)")
+            self._set_auth_state("sign_in_required", f"Steam account {display_name} detected, but SteamCMD has no cached login.")
             self.log(f"Steam user detected, but SteamCMD has no cached login: {display_name} ({local_account['steamid']})")
             return local_account
 
-        self.steam_login_status_var.set("Steam login: sign-in required")
+        self._set_auth_state("sign_in_required")
         return None
 
     def _bootstrap_steam_environment(self):
@@ -1373,7 +1399,7 @@ class WorkshopUploader:
             self.save_config()
         else:
             self.steamcmd_status_var.set("SteamCMD: not found")
-            self.steam_login_status_var.set("Steam login: SteamCMD unavailable")
+            self._set_auth_state("steamcmd_unavailable")
             self.log("SteamCMD was not found automatically; Browse or Auto-DL remains available.")
 
         if self.api_key_var.get().strip() and self.manage_identity_var.get().strip():
@@ -1575,37 +1601,43 @@ class WorkshopUploader:
         ttk.Button(path_actions, text="BROWSE", command=self.browse_steamcmd).pack(side="left")
         ttk.Button(path_actions, text="AUTO-DL", command=self.download_steamcmd).pack(side="left", padx=(5, 0))
 
-        ttk.Label(frame, text="Steam Username:").grid(row=1, column=0, sticky="w", pady=5)
+        self.user_label = ttk.Label(frame, text="Steam Username:")
+        self.user_label.grid(row=1, column=0, sticky="w", pady=5)
         self.user_entry = ttk.Entry(frame, textvariable=self.username_var)
         self.user_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
 
-        ttk.Label(frame, text="Password:").grid(row=1, column=2, sticky="e", pady=5)
+        self.pwd_label = ttk.Label(frame, text="Password:")
+        self.pwd_label.grid(row=1, column=2, sticky="e", pady=5)
         self.pwd_entry = ttk.Entry(frame, textvariable=self.password_var, show="*")
         self.pwd_entry.grid(row=1, column=3, sticky="ew", padx=(5, 0), pady=5)
 
-        ttk.Label(frame, text="2FA Code:").grid(row=2, column=0, sticky="w")
+        self.guard_label = ttk.Label(frame, text="Steam Guard Code:")
+        self.guard_label.grid(row=2, column=0, sticky="w")
         self.guard_entry = ttk.Entry(frame, textvariable=self.steam_guard_var, width=12)
         self.guard_entry.grid(row=2, column=1, sticky="w", padx=5)
 
-        auth_row = ttk.Frame(frame)
-        auth_row.grid(row=2, column=2, columnspan=2, sticky="w")
-        self.qr_btn = ttk.Button(auth_row, text="QR WEB CHECK", command=self.start_qr_login)
+        self.auth_row = ttk.Frame(frame)
+        self.auth_row.grid(row=2, column=2, columnspan=2, sticky="w")
+        self.qr_btn = ttk.Button(self.auth_row, text="STEAM QR", command=self.start_qr_login)
         self.qr_btn.pack(side="left")
-        cached_cb = ttk.Checkbutton(auth_row, text="USE EXISTING STEAMCMD LOGIN", variable=self.use_cached_creds_var)
-        cached_cb.pack(side="left", padx=10)
-        self.test_steam_login_btn = ttk.Button(auth_row, text="TEST STEAMCMD LOGIN", command=self.test_steamcmd_login)
-        self.test_steam_login_btn.pack(side="left")
+        self.cached_cb = ttk.Checkbutton(self.auth_row, text="USE CACHED LOGIN", variable=self.use_cached_creds_var)
+        self.test_steam_login_btn = ttk.Button(self.auth_row, text="SIGN IN", command=self.test_steamcmd_login)
+        self.test_steam_login_btn.pack(side="left", padx=(5, 0))
 
-        ttk.Label(frame, text="Steam Web API Key:").grid(row=3, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(frame, textvariable=self.api_key_var, show="*").grid(row=3, column=1, sticky="ew", padx=5, pady=(5, 0))
-        ttk.Button(frame, text="?", command=self.open_api_key_link, width=3).grid(row=3, column=2, sticky="w", padx=(0, 5), pady=(5, 0))
+        ttk.Label(frame, textvariable=self.auth_detail_var, foreground="#ffcc66", wraplength=620).grid(
+            row=3, column=0, columnspan=4, sticky="w", pady=(4, 2)
+        )
+
+        ttk.Label(frame, text="Steam Web API Key:").grid(row=4, column=0, sticky="w", pady=(5, 0))
+        ttk.Entry(frame, textvariable=self.api_key_var, show="*").grid(row=4, column=1, sticky="ew", padx=5, pady=(5, 0))
+        ttk.Button(frame, text="?", command=self.open_api_key_link, width=3).grid(row=4, column=2, sticky="w", padx=(0, 5), pady=(5, 0))
         self.test_api_key_btn = ttk.Button(frame, text="TEST KEY", command=self.test_api_key)
-        self.test_api_key_btn.grid(row=3, column=3, sticky="w", pady=(5, 0))
+        self.test_api_key_btn.grid(row=4, column=3, sticky="w", pady=(5, 0))
         native_appid_cb = ttk.Checkbutton(frame, text="NATIVE TAGS VIA steam_appid.txt", variable=self.experimental_native_appid_var)
-        native_appid_cb.grid(row=4, column=1, columnspan=3, sticky="w", pady=(5, 0))
+        native_appid_cb.grid(row=5, column=1, columnspan=3, sticky="w", pady=(5, 0))
 
         status_row = ttk.Frame(frame)
-        status_row.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        status_row.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         for status_var in (
             self.steamcmd_status_var,
             self.steam_login_status_var,
@@ -2185,12 +2217,58 @@ class WorkshopUploader:
         self.log("QR Login cancelled.")
 
     def _toggle_auth_fields(self, *args):
+        if not hasattr(self, "user_entry"):
+            return
+
         is_busy = bool(self._active_operations)
-        state = "disabled" if self.use_cached_creds_var.get() or is_busy else "normal"
-        self.user_entry.config(state=state)
-        self.pwd_entry.config(state=state)
-        self.guard_entry.config(state=state)
-        self.qr_btn.config(state=state)
+        auth_state = getattr(self, "auth_state", "unknown")
+        manual_states = {
+            "sign_in_required",
+            "bad_credentials",
+            "guard_required",
+            "timeout",
+            "failed",
+            "qr_confirmed",
+        }
+        show_manual = auth_state in manual_states and not self.use_cached_creds_var.get()
+        show_guard = auth_state == "guard_required" and not self.use_cached_creds_var.get()
+        show_qr = auth_state in manual_states or auth_state in {"qr_pending", "mobile_approval"}
+
+        for widget in (self.user_label, self.user_entry, self.pwd_label, self.pwd_entry):
+            if show_manual:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+        for widget in (self.guard_label, self.guard_entry):
+            if show_guard:
+                widget.grid()
+            else:
+                widget.grid_remove()
+
+        if show_qr:
+            if not self.qr_btn.winfo_manager():
+                self.qr_btn.pack(side="left")
+        else:
+            self.qr_btn.pack_forget()
+
+        if auth_state == "guard_required":
+            self.test_steam_login_btn.config(text="RETRY WITH CODE")
+        elif auth_state in {"cached_ready", "verified"}:
+            self.test_steam_login_btn.config(text="VERIFY LOGIN")
+        elif auth_state == "mobile_approval":
+            self.test_steam_login_btn.config(text="WAITING FOR STEAM APP...")
+        else:
+            self.test_steam_login_btn.config(text="SIGN IN")
+
+        field_state = "disabled" if is_busy else "normal"
+        for widget in (self.user_entry, self.pwd_entry, self.guard_entry):
+            try:
+                widget.config(state=field_state)
+            except Exception:
+                pass
+
+        self.qr_btn.config(state="disabled" if is_busy else "normal")
 
     def _build_mod_inventory(self, mod_dir):
         return self._get_mod_scanner().build_inventory(mod_dir)
