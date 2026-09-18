@@ -371,7 +371,11 @@ class WorkshopUploader:
         self.readiness_summary_var = tk.StringVar(value="Readiness: Select a content folder.")
         self.readiness_detail_var = tk.StringVar(value="")
         self.library_status_var = tk.StringVar(value="Workshop library not loaded.")
+        self.activity_summary_var = tk.StringVar(value="Ready.")
         self.project_filter_var = tk.StringVar()
+        self.access_advanced_expanded = False
+        self.readiness_expanded = False
+        self.activity_log_expanded = False
         
         self.setup_styles()
         self.setup_ui()
