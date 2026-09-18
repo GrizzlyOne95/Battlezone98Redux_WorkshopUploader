@@ -259,11 +259,31 @@ class TestWorkshopUploader(unittest.TestCase):
             )
 
     def test_workshop_backend_queries_all_workshop_pages(self):
+        def detail(index):
+            return {
+                "title": f"Item {index}",
+                "publishedfileid": str(1000 + index),
+                "visibility": 0 if index % 2 else 2,
+                "time_updated": 1700000000 + index,
+            }
+
         first = MagicMock()
-        first.json.return_value = {"response": {"total": 2, "publishedfiledetails": [{"title": "One", "publishedfileid": "111", "visibility": 0, "time_updated": 1700000000}]}}
+        first.json.return_value = {
+            "response": {
+                "total": 38,
+                "publishedfiledetails": [detail(i) for i in range(1, 11)],
+            }
+        }
         second = MagicMock()
-        second.json.return_value = {"response": {"total": 2, "publishedfiledetails": [{"title": "Two", "publishedfileid": "222", "visibility": 2, "time_updated": 1700000100}]}}
-        self.uploader.workshop_backend.steam_service.request_with_retry = MagicMock(side_effect=[first, second])
+        second.json.return_value = {
+            "response": {
+                "total": 38,
+                "publishedfiledetails": [detail(i) for i in range(11, 39)],
+            }
+        }
+        self.uploader.workshop_backend.steam_service.request_with_retry = MagicMock(
+            side_effect=[first, second]
+        )
 
         steam_id, items, meta = self.uploader.workshop_backend.query_workshop_items(
             api_key="key", identity_input="76561198000000001", appid="301650",
@@ -271,15 +291,20 @@ class TestWorkshopUploader(unittest.TestCase):
         )
 
         self.assertEqual(steam_id, "76561198000000001")
-        self.assertEqual([item["publishedfileid"] for item in items], ["111", "222"])
+        self.assertEqual(len(items), 38)
+        self.assertEqual(items[0]["publishedfileid"], "1001")
+        self.assertEqual(items[-1]["publishedfileid"], "1038")
         self.assertEqual(meta["pages"], 2)
-        self.assertEqual(meta["total"], 2)
+        self.assertEqual(meta["total"], 38)
         calls = self.uploader.workshop_backend.steam_service.request_with_retry.call_args_list
+        self.assertEqual(len(calls), 2)
         self.assertIn("IPublishedFileService/GetUserFiles", calls[0].args[1])
         self.assertEqual(calls[0].kwargs["params"]["page"], 1)
         self.assertEqual(calls[1].kwargs["params"]["page"], 2)
         self.assertEqual(calls[0].kwargs["params"]["steamid"], "76561198000000001")
         self.assertEqual(calls[0].kwargs["params"]["appid"], "301650")
+        self.assertEqual(calls[0].kwargs["params"]["numperpage"], 100)
+
 
     def test_workshop_backend_fetches_details_from_remote_storage_endpoint(self):
         response = MagicMock()
