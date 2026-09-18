@@ -1,6 +1,9 @@
 import json
 import os
+import queue
 import subprocess
+import threading
+import time
 from datetime import datetime
 
 
@@ -51,7 +54,67 @@ class WorkshopBackend:
         process = subprocess.Popen(cmd, creationflags=creation_flags)
         return process, cmd
 
-    def test_steamcmd_login(self, exe, user, pwd, use_cached, guard_code="", timeout=60):
+    def classify_steamcmd_login_output(self, output, returncode=None, timed_out=False):
+        lower = (output or "").lower()
+
+        bad_password_markers = (
+            "invalid password",
+            "invalid login",
+            "login failure",
+            "failed to login",
+            "incorrect password",
+        )
+        guard_markers = (
+            "steam guard code",
+            "two-factor code",
+            "two factor code",
+            "two-factor authentication",
+            "enter the current code",
+            "account logon denied",
+            "steam guard",
+        )
+        mobile_markers = (
+            "steam mobile app",
+            "mobile app to confirm",
+            "approve the sign in",
+            "approve this sign in",
+            "waiting for confirmation",
+            "confirm your sign in",
+        )
+        success_markers = (
+            "logged in ok",
+            "waiting for user info...ok",
+            "login complete",
+        )
+
+        if any(marker in lower for marker in bad_password_markers):
+            return "bad_credentials"
+        if timed_out and any(marker in lower for marker in mobile_markers):
+            return "timeout"
+        if any(marker in lower for marker in mobile_markers):
+            return "mobile_approval"
+        if any(marker in lower for marker in guard_markers):
+            return "guard_required"
+        if any(marker in lower for marker in success_markers):
+            return "verified"
+        if returncode == 0 and not timed_out:
+            return "verified"
+        if timed_out:
+            return "timeout"
+        if returncode not in (None, 0):
+            return "failed"
+        return "checking"
+
+    def test_steamcmd_login(
+        self,
+        exe,
+        user,
+        pwd,
+        use_cached,
+        guard_code="",
+        timeout=180,
+        state_callback=None,
+    ):
         cmd = self.build_steamcmd_login_test_command(
             exe=exe,
             user=user,
@@ -59,30 +122,103 @@ class WorkshopBackend:
             use_cached=use_cached,
             guard_code=guard_code,
         )
-        completed = subprocess.run(
+        process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             errors="ignore",
-            timeout=timeout,
+            bufsize=1,
         )
-        output = completed.stdout or ""
-        lower = output.lower()
-        failure_markers = (
-            "login failure",
-            "invalid password",
-            "invalid login",
-            "failed to login",
-            "steam guard code is required",
-            "two-factor code mismatch",
-            "account logon denied",
+        output_lines = []
+        output_queue = queue.Queue()
+
+        def reader():
+            try:
+                if process.stdout is None:
+                    return
+                while True:
+                    char = process.stdout.read(1)
+                    if not char:
+                        break
+                    output_queue.put(char)
+            finally:
+                output_queue.put(None)
+
+        reader_thread = threading.Thread(target=reader, daemon=True)
+        reader_thread.start()
+        deadline = time.monotonic() + max(1, timeout)
+        last_state = "checking"
+        if state_callback:
+            state_callback(last_state)
+
+        def drain_output():
+            while True:
+                try:
+                    line = output_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if line is None:
+                    break
+                output_lines.append(line)
+
+        timed_out = False
+        while process.poll() is None:
+            drain_output()
+            current_output = "".join(output_lines)
+            state = self.classify_steamcmd_login_output(current_output)
+            if state != last_state and state in ("guard_required", "mobile_approval"):
+                last_state = state
+                if state_callback:
+                    state_callback(state)
+
+            if state == "guard_required" and not guard_code:
+                try:
+                    process.terminate()
+                    process.wait(timeout=3)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                drain_output()
+                return {
+                    "returncode": process.returncode,
+                    "success": False,
+                    "state": "guard_required",
+                    "output": "".join(output_lines),
+                    "command": cmd,
+                }
+
+            if time.monotonic() >= deadline:
+                timed_out = True
+                try:
+                    process.terminate()
+                    process.wait(timeout=3)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                break
+            time.sleep(0.1)
+
+        drain_output()
+        reader_thread.join(timeout=1)
+        drain_output()
+        output = "".join(output_lines)
+        state = self.classify_steamcmd_login_output(
+            output,
+            returncode=process.returncode,
+            timed_out=timed_out,
         )
-        failed = completed.returncode != 0 or any(marker in lower for marker in failure_markers)
-        succeeded = not failed
+        if guard_code and state == "guard_required":
+            state = "failed"
+        success = state == "verified"
         return {
-            "returncode": completed.returncode,
-            "success": succeeded,
+            "returncode": process.returncode,
+            "success": success,
+            "state": state,
             "output": output,
             "command": cmd,
         }
