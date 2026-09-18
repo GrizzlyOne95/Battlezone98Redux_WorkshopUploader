@@ -133,7 +133,7 @@ class TemplateWizard(tk.Toplevel):
     def __init__(self, parent, colors, on_success):
         super().__init__(parent)
         apply_window_icon(self)
-        self.title("New Project Wizard")
+        self.title("New Content Wizard")
         self.geometry("500x550")
         self.configure(bg=colors["bg"])
         self.colors = colors
@@ -158,10 +158,10 @@ class TemplateWizard(tk.Toplevel):
         frame = ttk.Frame(self, padding=20)
         frame.pack(fill="both", expand=True)
         
-        ttk.Label(frame, text="CREATE NEW BZR PROJECT", font=("Consolas", 14, "bold"), foreground=c["highlight"]).pack(pady=(0, 20))
+        ttk.Label(frame, text="CREATE NEW BZR CONTENT", font=("Consolas", 14, "bold"), foreground=c["highlight"]).pack(pady=(0, 20))
         
         # Name
-        ttk.Label(frame, text="Mission Name:").pack(anchor="w")
+        ttk.Label(frame, text="Content Name:").pack(anchor="w")
         ttk.Entry(frame, textvariable=self.name_var).pack(fill="x", pady=(0, 15))
         
         # Map Type
@@ -187,7 +187,7 @@ class TemplateWizard(tk.Toplevel):
         btn_frame = ttk.Frame(frame)
         btn_frame.pack(fill="x", side="bottom", pady=20)
         
-        ttk.Button(btn_frame, text="CREATE PROJECT", command=self.create_project, style="Success.TButton").pack(side="right", padx=5)
+        ttk.Button(btn_frame, text="CREATE CONTENT", command=self.create_project, style="Success.TButton").pack(side="right", padx=5)
         ttk.Button(btn_frame, text="CANCEL", command=self.destroy).pack(side="right")
 
     def _toggle_mp_fields(self, event=None):
@@ -201,10 +201,10 @@ class TemplateWizard(tk.Toplevel):
     def create_project(self):
         name = self.name_var.get().strip()
         if not name:
-            messagebox.showerror("Error", "Project name cannot be empty.")
+            messagebox.showerror("Error", "Content name cannot be empty.")
             return
             
-        target_dir = filedialog.askdirectory(title="Select Parent Folder for New Project")
+        target_dir = filedialog.askdirectory(title="Select Parent Folder for New Content")
         if not target_dir: return
         
         project_path = os.path.join(target_dir, name)
@@ -254,7 +254,7 @@ gameType = "{g_type}"
             
             self.on_success(project_path)
             self.destroy()
-            messagebox.showinfo("Success", f"Project '{name}' created successfully!")
+            messagebox.showinfo("Success", f"Content '{name}' created successfully!")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to create project: {e}")
@@ -363,9 +363,9 @@ class WorkshopUploader:
         self.workshop_backend = WorkshopBackend(self.steam_service, logger=self.log)
         self.memory_analyzer = MemoryAnalyzer(logger=self.log, has_pil=HAS_PIL, image_module=Image if HAS_PIL else None)
         self.content_fixer = ContentFixer(logger=self.log)
-        self.project_name_var = tk.StringVar(value="NO PROJECT")
-        self.project_hint_var = tk.StringVar(value="Select a mod folder to begin.")
-        self.publish_target_var = tk.StringVar(value="TARGET: CREATE NEW ITEM")
+        self.project_name_var = tk.StringVar(value="NO UPLOAD PROFILE")
+        self.project_hint_var = tk.StringVar(value="Select a content folder to begin.")
+        self.publish_target_var = tk.StringVar(value="WORKSHOP ITEM: NEW")
         self.last_upload_var = tk.StringVar(value="LAST PUBLISH: NONE")
         self.changed_since_upload_var = tk.StringVar(value="CHANGED FILES: UNKNOWN")
         self.readiness_summary_var = tk.StringVar(value="Readiness: Select a content folder.")
@@ -575,7 +575,7 @@ class WorkshopUploader:
         mod_path = self.mod_path.get().strip()
         if not mod_path:
             if not quiet:
-                messagebox.showinfo("Project", "Select a content folder before saving project state.")
+                messagebox.showinfo("Upload Profile", "Select a content folder before saving the local upload profile.")
             return None
 
         payload = self._build_project_payload()
@@ -583,7 +583,7 @@ class WorkshopUploader:
             profile_path = self.project_store.save_project(payload)
         except Exception as e:
             if not quiet:
-                messagebox.showerror("Error", f"Failed to save project state: {e}")
+                messagebox.showerror("Error", f"Failed to save upload profile: {e}")
             return None
 
         self.current_project_profile_path = profile_path
@@ -592,7 +592,7 @@ class WorkshopUploader:
         self.project_hint_var.set(os.path.abspath(mod_path))
         self.refresh_recent_projects()
         if not quiet:
-            self.log(f"Saved project state: {os.path.basename(profile_path)}")
+            self.log(f"Saved local upload profile: {os.path.basename(profile_path)}")
         return profile_path
 
     def refresh_recent_projects(self):
@@ -614,8 +614,17 @@ class WorkshopUploader:
             updated = project.get("last_opened", "")
             if "T" in updated:
                 updated = updated.split("T", 1)[0]
-            item_id = project.get("item_id", "0") or "0"
-            self.project_tree.insert("", "end", values=(project_name, item_id, updated), tags=(project.get("profile_path", ""),))
+            item_id = str(project.get("item_id", "0") or "0")
+            item_display = item_id if item_id.isdigit() and item_id != "0" else "New"
+            row_id = self.project_tree.insert(
+                "",
+                "end",
+                values=(project_name, item_display, updated),
+                tags=(project.get("profile_path", ""),),
+            )
+            if project.get("profile_path", "") == self.current_project_profile_path:
+                self.project_tree.selection_set(row_id)
+                self.project_tree.see(row_id)
 
     def _load_project_from_path(self, profile_path):
         data = self.project_store.load_project(profile_path)
@@ -634,9 +643,9 @@ class WorkshopUploader:
             self.manage_identity_var.set(data.get("manage_identity", self.manage_identity_var.get()))
         finally:
             self.autosave_suspended = False
-        self.project_name_var.set((data.get("project_name") or os.path.basename(data.get("mod_path", "")) or "NO PROJECT").upper())
+        self.project_name_var.set((data.get("project_name") or os.path.basename(data.get("mod_path", "")) or "NO UPLOAD PROFILE").upper())
         mod_path = data.get("mod_path", "")
-        self.project_hint_var.set(os.path.abspath(mod_path) if mod_path else "Saved project loaded.")
+        self.project_hint_var.set(os.path.abspath(mod_path) if mod_path else "Saved upload profile loaded.")
         self._update_project_status(self.current_inventory)
         self.refresh_recent_projects()
         return data
@@ -646,7 +655,7 @@ class WorkshopUploader:
             return False
         selected = self.project_tree.selection()
         if not selected:
-            messagebox.showinfo("Project", "Select a saved project first.")
+            messagebox.showinfo("Upload Profile", "Select a local upload profile first.")
             return False
 
         tags = self.project_tree.item(selected[0]).get("tags", [])
@@ -654,21 +663,62 @@ class WorkshopUploader:
             return False
         self._load_project_from_path(tags[0])
         self.refresh_current_project_readiness()
-        self.log(f"Loaded project: {os.path.basename(tags[0])}")
+        self.log(f"Opened local upload profile: {os.path.basename(tags[0])}")
         return True
 
-    def _handle_new_project_created(self, project_path):
-        self.mod_path.set(project_path)
+    def _activate_content_folder(self, folder, quiet=False):
+        raw_folder = (folder or "").strip()
+        if not raw_folder:
+            return None
+        folder = os.path.abspath(raw_folder)
+        if not os.path.isdir(folder):
+            if not quiet:
+                messagebox.showerror("Content Folder", "Select an existing content folder.")
+            return None
+
+        matched = self.project_store.find_by_mod_path(folder)
+        if matched:
+            self._load_project_from_path(matched["profile_path"])
+            self.refresh_current_project_readiness()
+            if not quiet:
+                self.log(f"Opened upload profile for: {folder}")
+            return "opened"
+
+        folder_name = os.path.basename(folder.rstrip("\\/")) or "Workshop Item"
+        self.autosave_suspended = True
+        try:
+            self.current_project_profile_path = ""
+            self.current_project_data = {}
+            self.current_inventory = []
+            self.current_findings = None
+            self.current_readiness = None
+            self.mod_path.set(folder)
+            self.preview_path.set("")
+            self.title_var.set(folder_name)
+            self._set_desc_text_value("")
+            self.visibility_var.set("0 (Public)")
+            self.item_id_var.set("0")
+            self.note_var.set("Initial Release")
+            self.tags_var.set("")
+        finally:
+            self.autosave_suspended = False
+
+        profile_path = self.save_current_project_state(quiet=True)
         self.refresh_current_project_readiness()
-        self.save_current_project_state(quiet=True)
+        if not quiet and profile_path:
+            self.log(f"Created local upload profile for: {folder}")
+        return "created" if profile_path else None
+
+    def _handle_new_project_created(self, project_path):
+        self._activate_content_folder(project_path, quiet=True)
 
     def _on_mod_path_changed(self, *args):
         mod_path = self.mod_path.get().strip()
         if not hasattr(self, "project_name_var"):
             return
         if not mod_path:
-            self.project_name_var.set("NO PROJECT")
-            self.project_hint_var.set("Select a mod folder to begin.")
+            self.project_name_var.set("NO UPLOAD PROFILE")
+            self.project_hint_var.set("Select a content folder to begin.")
             return
 
         matched = self.project_store.find_by_mod_path(mod_path)
@@ -676,10 +726,19 @@ class WorkshopUploader:
             self._load_project_from_path(matched["profile_path"])
             return
 
-        project_name = os.path.basename(mod_path.rstrip("\\/")) or "project"
+        current_mod_path = (self.current_project_data or {}).get("mod_path", "")
+        if current_mod_path:
+            current_key = os.path.normcase(os.path.abspath(current_mod_path))
+            next_key = os.path.normcase(os.path.abspath(mod_path))
+            if current_key != next_key:
+                self.current_project_profile_path = ""
+                self.current_project_data = {}
+
+        project_name = os.path.basename(mod_path.rstrip("\\/")) or "profile"
         self.project_name_var.set(project_name.upper())
         self.project_hint_var.set(os.path.abspath(mod_path))
-        self.current_project_profile_path = self.current_project_profile_path or self.project_store._profile_path_for_mod(mod_path)
+        if not self.current_project_profile_path:
+            self.current_project_profile_path = self.project_store._profile_path_for_mod(mod_path)
         if hasattr(self, "readiness_tree"):
             self.refresh_current_project_readiness()
 
@@ -783,9 +842,9 @@ class WorkshopUploader:
         project = self.current_project_data or {}
         item_id = self.item_id_var.get().strip()
         if item_id.isdigit() and item_id != "0":
-            self.publish_target_var.set(f"TARGET: UPDATE ITEM {item_id}")
+            self.publish_target_var.set(f"WORKSHOP ITEM: #{item_id}")
         else:
-            self.publish_target_var.set("TARGET: CREATE NEW ITEM")
+            self.publish_target_var.set("WORKSHOP ITEM: NEW")
 
         last_upload_at = project.get("last_upload_at")
         if last_upload_at:
@@ -1509,11 +1568,17 @@ class WorkshopUploader:
         self.manage_tab = None
 
     def setup_project_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" PROJECTS ", padding=10)
+        frame = ttk.LabelFrame(parent, text=" LOCAL UPLOAD PROFILES ", padding=10)
         frame.pack(fill="both", expand=True, pady=(0, 10))
 
         ttk.Label(frame, textvariable=self.project_name_var, font=(self.current_font, 12, "bold"), foreground=self.colors["highlight"]).pack(anchor="w")
-        ttk.Label(frame, text="Saved local projects paired to Workshop items when available.", foreground=self.colors["fg"]).pack(anchor="w", pady=(2, 8))
+        ttk.Label(
+            frame,
+            text="One local profile per content folder. Selecting a folder opens or creates its profile automatically.",
+            foreground=self.colors["fg"],
+            wraplength=300,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 8))
 
         filter_row = ttk.Frame(frame)
         filter_row.pack(fill="x", pady=(0, 6))
@@ -1525,7 +1590,7 @@ class WorkshopUploader:
         tree_frame = ttk.Frame(frame)
         tree_frame.pack(fill="both", expand=True)
         self.project_tree = ttk.Treeview(tree_frame, columns=("Name", "Item", "Updated"), show="headings", height=10)
-        self.project_tree.heading("Name", text="Project")
+        self.project_tree.heading("Name", text="Profile")
         self.project_tree.heading("Item", text="Workshop ID")
         self.project_tree.heading("Updated", text="Last Opened")
         self.project_tree.column("Name", width=180)
@@ -1540,21 +1605,21 @@ class WorkshopUploader:
         btn_row = ttk.Frame(frame)
         btn_row.pack(fill="x", pady=(8, 0))
         ttk.Button(btn_row, text="OPEN", command=self.open_selected_project).pack(side="left")
-        ttk.Button(btn_row, text="SAVE", command=self.save_current_project_state).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="SELECT FOLDER", command=self.browse_content).pack(side="left", padx=4)
         ttk.Button(btn_row, text="EXPORT", command=self.save_profile).pack(side="right")
         ttk.Button(btn_row, text="IMPORT", command=self.load_profile).pack(side="right", padx=4)
 
     def setup_library_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" 2. WORKSHOP LIBRARY ", padding=10)
+        frame = ttk.LabelFrame(parent, text=" YOUR WORKSHOP ITEMS ", padding=10)
         frame.pack(fill="both", expand=True)
 
         ctrl_row = ttk.Frame(frame)
         ctrl_row.pack(fill="x", pady=(0, 6))
         self.refresh_btn = ttk.Button(ctrl_row, text="REFRESH", command=self.refresh_workshop_items)
         self.refresh_btn.pack(side="left")
-        self.manage_set_target_btn = ttk.Button(ctrl_row, text="PAIR", command=self.use_selected_item_id_for_upload)
+        self.manage_set_target_btn = ttk.Button(ctrl_row, text="USE ITEM", command=self.use_selected_item_id_for_upload)
         self.manage_set_target_btn.pack(side="left", padx=4)
-        self.manage_update_btn = ttk.Button(ctrl_row, text="LOAD DETAILS", command=self.prepare_update)
+        self.manage_update_btn = ttk.Button(ctrl_row, text="LOAD ITEM", command=self.prepare_update)
         self.manage_update_btn.pack(side="left")
 
         identity_row = ttk.Frame(frame)
@@ -1585,7 +1650,6 @@ class WorkshopUploader:
         self.tree.configure(yscrollcommand=lib_scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
         lib_scroll.pack(side="right", fill="y")
-        self.tree.bind("<<TreeviewSelect>>", self._on_manage_selection)
         self.tree.bind("<Double-1>", lambda _e: self.prepare_update())
 
     def setup_access_panel(self, parent):
@@ -1647,7 +1711,7 @@ class WorkshopUploader:
             ttk.Label(status_row, textvariable=status_var, foreground="#ffff44").pack(side="left", padx=(0, 18))
 
     def setup_editor_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" 3. PROJECT WORKSPACE ", padding=10)
+        frame = ttk.LabelFrame(parent, text=" WORKSHOP ITEM EDITOR ", padding=10)
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(1, weight=3)
         frame.columnconfigure(3, weight=2)
@@ -1656,15 +1720,20 @@ class WorkshopUploader:
         top_row.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 10))
         self.upload_mode_label = ttk.Label(top_row, text="", foreground=self.colors["highlight"], font=(self.current_font, 11, "bold"))
         self.upload_mode_label.pack(side="left")
-        ttk.Button(top_row, text="NEW TARGET", command=self.set_create_mode).pack(side="right")
+        ttk.Button(top_row, text="NEW ITEM", command=self.set_create_mode).pack(side="right")
         ttk.Button(top_row, text="OPEN PAGE", command=self.open_workshop_page).pack(side="right", padx=4)
 
+        ttk.Label(
+            top_row,
+            text="Select a content folder first; its upload profile opens automatically.",
+            foreground=self.colors["fg"],
+        ).pack(side="left", padx=(16, 0))
         ttk.Label(frame, text="Content Folder:").grid(row=1, column=0, sticky="w")
         ttk.Entry(frame, textvariable=self.mod_path).grid(row=1, column=1, columnspan=3, sticky="ew", padx=5)
         path_btns = ttk.Frame(frame)
         path_btns.grid(row=2, column=1, columnspan=3, sticky="w", pady=(4, 8))
-        ttk.Button(path_btns, text="BROWSE", command=self.browse_content).pack(side="left")
-        ttk.Button(path_btns, text="NEW", command=self.open_template_wizard).pack(side="left", padx=4)
+        ttk.Button(path_btns, text="SELECT FOLDER", command=self.browse_content).pack(side="left")
+        ttk.Button(path_btns, text="NEW CONTENT", command=self.open_template_wizard).pack(side="left", padx=4)
         ttk.Button(path_btns, text="ANALYZE", command=self.analyze_memory_usage).pack(side="left")
         ttk.Button(path_btns, text="RESCAN", command=self.refresh_current_project_readiness).pack(side="left", padx=4)
 
@@ -1765,17 +1834,17 @@ class WorkshopUploader:
 
     def _update_upload_mode_indicator(self, *args):
         item_id = self.item_id_var.get().strip()
-        is_update = item_id.isdigit() and item_id != "0"
-        text = f"MODE: UPDATE EXISTING ITEM ({item_id})" if is_update else "MODE: CREATE NEW ITEM"
-        color = "#ffcc66" if is_update else self.colors["highlight"]
+        is_existing = item_id.isdigit() and item_id != "0"
+        text = f"WORKSHOP ITEM #{item_id}" if is_existing else "NEW WORKSHOP ITEM"
+        color = "#ffcc66" if is_existing else self.colors["highlight"]
         if hasattr(self, "upload_mode_label"):
             self.upload_mode_label.config(text=text, foreground=color)
         if hasattr(self, "publish_target_var"):
-            self.publish_target_var.set(f"TARGET: UPDATE ITEM {item_id}" if is_update else "TARGET: CREATE NEW ITEM")
+            self.publish_target_var.set(f"WORKSHOP ITEM: #{item_id}" if is_existing else "WORKSHOP ITEM: NEW")
 
     def set_create_mode(self):
         self.item_id_var.set("0")
-        self.log("Upload mode set to CREATE NEW ITEM.")
+        self.log("Workshop item link cleared; the next publish will create a new item.")
 
     def _friendly_api_error(self, error=None, response=None):
         return self._get_steam_service().friendly_api_error(error=error, response=response)
@@ -1931,7 +2000,11 @@ class WorkshopUploader:
         return None
 
     def save_profile(self):
-        f = filedialog.asksaveasfilename(initialdir=self.profiles_dir, defaultextension=".json", filetypes=[("JSON Profile", "*.json")])
+        f = filedialog.asksaveasfilename(
+            initialdir=self.profiles_dir,
+            defaultextension=".json",
+            filetypes=[("Upload Profile", "*.json"), ("JSON Profile", "*.json")],
+        )
         if not f: return
         
         data = {
@@ -1952,25 +2025,40 @@ class WorkshopUploader:
             messagebox.showerror("Error", f"Failed to save profile: {e}")
 
     def load_profile(self):
-        f = filedialog.askopenfilename(initialdir=self.profiles_dir, filetypes=[("JSON Profile", "*.json")])
-        if not f: return
-        
+        f = filedialog.askopenfilename(
+            initialdir=self.profiles_dir,
+            filetypes=[("Upload Profile", "*.json"), ("JSON Profile", "*.json")],
+        )
+        if not f:
+            return
+
         try:
             data = self._get_file_manager().load_profile(f)
-            self.mod_path.set(data.get("mod_path", ""))
-            self.preview_path.set(data.get("preview_path", ""))
-            self.title_var.set(data.get("title", ""))
-            self._set_desc_text_value(data.get("description", ""))
-            self.visibility_var.set(self._normalize_visibility_value(data.get("visibility", "0 (Public)")))
-            self.item_id_var.set(data.get("item_id", "0"))
-            self.note_var.set(data.get("change_note", ""))
-            self.tags_var.set(data.get("tags", ""))
-            self.current_project_profile_path = f if os.path.dirname(os.path.abspath(f)) == os.path.abspath(self.profiles_dir) else ""
-            self.current_project_data = data
+            mod_path = (data.get("mod_path") or "").strip()
+            self.autosave_suspended = True
+            try:
+                self.current_project_profile_path = ""
+                self.current_project_data = {}
+                self.mod_path.set(mod_path)
+                self.preview_path.set(data.get("preview_path", ""))
+                self.title_var.set(data.get("title", ""))
+                self._set_desc_text_value(data.get("description", ""))
+                self.visibility_var.set(self._normalize_visibility_value(data.get("visibility", "0 (Public)")))
+                self.item_id_var.set(data.get("item_id", "0"))
+                self.note_var.set(data.get("change_note", ""))
+                self.tags_var.set(data.get("tags", ""))
+                self.manage_identity_var.set(data.get("manage_identity", self.manage_identity_var.get()))
+            finally:
+                self.autosave_suspended = False
+
+            if mod_path:
+                self.current_project_data = data
+                self.current_project_profile_path = self.project_store._profile_path_for_mod(mod_path)
+                self.save_current_project_state(quiet=True)
             self.refresh_current_project_readiness()
-            self.log(f"Profile loaded: {os.path.basename(f)}")
+            self.log(f"Imported upload profile: {os.path.basename(f)}")
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to load profile: {e}")
+            messagebox.showerror("Error", f"Failed to import upload profile: {e}")
 
     def log(self, msg):
         self.root.after(0, lambda: self._log_impl(msg))
@@ -2074,10 +2162,10 @@ class WorkshopUploader:
             time.sleep(3)
 
     def browse_content(self):
-        d = filedialog.askdirectory()
-        if d:
-            self.mod_path.set(d)
-            self.refresh_current_project_readiness()
+        d = filedialog.askdirectory(title="Select Workshop Content Folder")
+        if not d:
+            return None
+        return self._activate_content_folder(d)
 
     def browse_preview(self):
         f = filedialog.askopenfilename(filetypes=[("Images", "*.jpg;*.png;*.jpeg")])
@@ -2567,7 +2655,7 @@ class WorkshopUploader:
                     self.update_workshop_tags(item_id_override=updated_item_id)
                 
                 self.root.after(0, self.refresh_current_project_readiness)
-                self.root.after(0, lambda: messagebox.showinfo("Success", "SteamCMD finished.\nProject state and publish snapshot were updated."))
+                self.root.after(0, lambda: messagebox.showinfo("Success", "SteamCMD finished.\nUpload profile and publish snapshot were updated."))
             else:
                 self.log(f"SteamCMD exited with code {p.returncode}")
                 
@@ -2595,6 +2683,15 @@ class WorkshopUploader:
         self.use_selected_item_id_for_upload(switch_to_upload=False, quiet=True)
 
     def use_selected_item_id_for_upload(self, switch_to_upload=True, quiet=False):
+        mod_path = self.mod_path.get().strip()
+        if not mod_path or not os.path.isdir(mod_path):
+            if not quiet:
+                messagebox.showinfo(
+                    "Content Folder",
+                    "Select a content folder first. Its local upload profile will be created or opened automatically.",
+                )
+            return False
+
         selected = self.tree.selection()
         if not selected:
             if not quiet:
@@ -2619,7 +2716,7 @@ class WorkshopUploader:
         self.save_current_project_state(quiet=True)
 
         if not quiet:
-            self.log(f"Project paired to Workshop ID {item_id}: {title}")
+            self.log(f"Upload profile linked to Workshop item {item_id}: {title}")
         return True
 
     def _resolve_vanity_to_steamid(self, vanity, api_key):
@@ -2777,7 +2874,8 @@ class WorkshopUploader:
         if not item_id or not str(item_id).isdigit():
             messagebox.showinfo("Info", "Select a Workshop item first.")
             return
-        self.use_selected_item_id_for_upload(switch_to_upload=False, quiet=True)
+        if not self.use_selected_item_id_for_upload(switch_to_upload=False, quiet=False):
+            return
         self.log(f"Fetching details for item {item_id}...")
         self._set_busy("Prepare Update", True)
         threading.Thread(target=self._prepare_update_worker, args=(item_id,), daemon=True).start()
