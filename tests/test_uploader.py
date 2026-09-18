@@ -693,7 +693,9 @@ class TestWorkshopUploader(unittest.TestCase):
         self.assertNotEqual(first, second)
 
     def test_auth_state_guard_required_reveals_guard_field(self):
-        self.uploader.use_cached_creds_var.set(False)
+        self.uploader.use_cached_creds_var = DummyVar(False)
+        self.uploader.steam_login_status_var = DummyVar("")
+        self.uploader.auth_detail_var = DummyVar("")
         self.uploader.guard_label.reset_mock()
         self.uploader.guard_entry.reset_mock()
 
@@ -704,7 +706,9 @@ class TestWorkshopUploader(unittest.TestCase):
         self.assertIn("Guard", self.uploader.steam_login_status_var.get())
 
     def test_auth_state_cached_ready_hides_manual_credentials(self):
-        self.uploader.use_cached_creds_var.set(True)
+        self.uploader.use_cached_creds_var = DummyVar(True)
+        self.uploader.steam_login_status_var = DummyVar("")
+        self.uploader.auth_detail_var = DummyVar("")
         self.uploader.user_entry.reset_mock()
         self.uploader.pwd_entry.reset_mock()
         self.uploader.guard_entry.reset_mock()
