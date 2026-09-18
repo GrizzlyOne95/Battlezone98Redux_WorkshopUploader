@@ -371,7 +371,11 @@ class WorkshopUploader:
         self.readiness_summary_var = tk.StringVar(value="Readiness: Select a content folder.")
         self.readiness_detail_var = tk.StringVar(value="")
         self.library_status_var = tk.StringVar(value="Workshop library not loaded.")
+        self.activity_summary_var = tk.StringVar(value="Ready.")
         self.project_filter_var = tk.StringVar()
+        self.access_advanced_expanded = False
+        self.readiness_expanded = False
+        self.activity_log_expanded = False
         
         self.setup_styles()
         self.setup_ui()
@@ -872,6 +876,7 @@ class WorkshopUploader:
             self.current_readiness = None
             self.readiness_summary_var.set("Readiness: Select a content folder.")
             self.readiness_detail_var.set("")
+            self._set_readiness_expanded(False)
             self._update_project_status([])
             return None
 
@@ -888,6 +893,8 @@ class WorkshopUploader:
         for row in rows:
             item_id = self.readiness_tree.insert("", "end", values=(row["severity"], row["type"], row["detail"]))
             self.readiness_item_by_id[item_id] = row
+        needs_attention = any(row.get("severity") != "Ready" for row in rows)
+        self._set_readiness_expanded(needs_attention)
         self._update_project_status(inventory)
         return findings
 
@@ -1307,6 +1314,8 @@ class WorkshopUploader:
                 self.log(f"Auto-detected SteamID64 from local login: {identity_input}")
 
         if not api_key:
+            if hasattr(self, "access_advanced_frame"):
+                self._set_access_advanced(True)
             if not quiet:
                 messagebox.showerror("Owner", "Enter a Steam Web API key before resolving a vanity URL.")
             self.owner_status_var.set("Workshop owner: needs API key")
@@ -1406,6 +1415,8 @@ class WorkshopUploader:
             self.steam_login_status_var.set(status)
         if hasattr(self, "auth_detail_var"):
             self.auth_detail_var.set(detail or default_detail)
+        if state == "steamcmd_unavailable" and hasattr(self, "access_advanced_frame"):
+            self._set_access_advanced(True)
         self._toggle_auth_fields()
 
     def _sync_steam_identity_from_local_state(self):
@@ -1622,18 +1633,7 @@ class WorkshopUploader:
         self.manage_update_btn = ttk.Button(ctrl_row, text="LOAD ITEM", command=self.prepare_update)
         self.manage_update_btn.pack(side="left")
 
-        identity_row = ttk.Frame(frame)
-        identity_row.pack(fill="x", pady=(0, 6))
-        ttk.Label(identity_row, text="Owner:").pack(side="left")
-        self.manage_owner_entry = ttk.Entry(identity_row, textvariable=self.manage_identity_var)
-        self.manage_owner_entry.pack(side="left", fill="x", expand=True, padx=6)
-        self.manage_detect_btn = ttk.Button(identity_row, text="USE CURRENT LOGIN", command=self.use_local_steam_identity)
-        self.manage_detect_btn.pack(side="left")
-        self.resolve_owner_btn = ttk.Button(identity_row, text="RESOLVE", command=self.resolve_owner_identity)
-        self.resolve_owner_btn.pack(side="left", padx=(4, 0))
-
         ttk.Label(frame, textvariable=self.library_status_var, foreground="#ffff44").pack(anchor="w", pady=(0, 6))
-        ttk.Label(frame, textvariable=self.owner_status_var, foreground=self.colors["accent"]).pack(anchor="w", pady=(0, 6))
 
         tree_frame = ttk.Frame(frame)
         tree_frame.pack(fill="both", expand=True)
@@ -1653,62 +1653,118 @@ class WorkshopUploader:
         self.tree.bind("<Double-1>", lambda _e: self.prepare_update())
 
     def setup_access_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" 1. ACCESS SETUP ", padding=10)
+        frame = ttk.LabelFrame(parent, text=" STEAM CONNECTION ", padding=10)
         frame.pack(fill="x", pady=(0, 10))
         frame.columnconfigure(1, weight=3)
         frame.columnconfigure(3, weight=2)
 
-        ttk.Label(frame, text="SteamCMD Path:").grid(row=0, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=self.steamcmd_path).grid(row=0, column=1, sticky="ew", padx=5)
-        path_actions = ttk.Frame(frame)
-        path_actions.grid(row=0, column=2, columnspan=2, sticky="e")
-        ttk.Button(path_actions, text="BROWSE", command=self.browse_steamcmd).pack(side="left")
-        ttk.Button(path_actions, text="AUTO-DL", command=self.download_steamcmd).pack(side="left", padx=(5, 0))
+        summary_row = ttk.Frame(frame)
+        summary_row.grid(row=0, column=0, columnspan=4, sticky="ew")
+        ttk.Label(
+            summary_row,
+            textvariable=self.steam_login_status_var,
+            foreground=self.colors["highlight"],
+            font=(self.current_font, 11, "bold"),
+        ).pack(side="left")
+        ttk.Label(summary_row, textvariable=self.owner_status_var, foreground=self.colors["accent"]).pack(side="left", padx=(16, 0))
+        ttk.Label(summary_row, textvariable=self.api_key_status_var, foreground="#ffff44").pack(side="left", padx=(16, 0))
+        self.access_toggle_btn = ttk.Button(summary_row, text="SETUP / ADVANCED", command=self.toggle_access_advanced)
+        self.access_toggle_btn.pack(side="right")
+
+        ttk.Label(
+            frame,
+            textvariable=self.auth_detail_var,
+            foreground="#ffcc66",
+            wraplength=620,
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 4))
 
         self.user_label = ttk.Label(frame, text="Steam Username:")
-        self.user_label.grid(row=1, column=0, sticky="w", pady=5)
+        self.user_label.grid(row=2, column=0, sticky="w", pady=5)
         self.user_entry = ttk.Entry(frame, textvariable=self.username_var)
-        self.user_entry.grid(row=1, column=1, sticky="ew", padx=5, pady=5)
+        self.user_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
 
         self.pwd_label = ttk.Label(frame, text="Password:")
-        self.pwd_label.grid(row=1, column=2, sticky="e", pady=5)
+        self.pwd_label.grid(row=2, column=2, sticky="e", pady=5)
         self.pwd_entry = ttk.Entry(frame, textvariable=self.password_var, show="*")
-        self.pwd_entry.grid(row=1, column=3, sticky="ew", padx=(5, 0), pady=5)
+        self.pwd_entry.grid(row=2, column=3, sticky="ew", padx=(5, 0), pady=5)
 
         self.guard_label = ttk.Label(frame, text="Steam Guard Code:")
-        self.guard_label.grid(row=2, column=0, sticky="w")
+        self.guard_label.grid(row=3, column=0, sticky="w")
         self.guard_entry = ttk.Entry(frame, textvariable=self.steam_guard_var, width=12)
-        self.guard_entry.grid(row=2, column=1, sticky="w", padx=5)
+        self.guard_entry.grid(row=3, column=1, sticky="w", padx=5)
 
         self.auth_row = ttk.Frame(frame)
-        self.auth_row.grid(row=2, column=2, columnspan=2, sticky="w")
+        self.auth_row.grid(row=3, column=2, columnspan=2, sticky="w")
         self.qr_btn = ttk.Button(self.auth_row, text="QR VERIFY", command=self.start_qr_login)
         self.qr_btn.pack(side="left")
         self.cached_cb = ttk.Checkbutton(self.auth_row, text="USE CACHED LOGIN", variable=self.use_cached_creds_var)
         self.test_steam_login_btn = ttk.Button(self.auth_row, text="SIGN IN", command=self.test_steamcmd_login)
         self.test_steam_login_btn.pack(side="left", padx=(5, 0))
 
-        ttk.Label(frame, textvariable=self.auth_detail_var, foreground="#ffcc66", wraplength=620).grid(
-            row=3, column=0, columnspan=4, sticky="w", pady=(4, 2)
+        self.access_advanced_frame = ttk.LabelFrame(frame, text=" ADVANCED STEAM SETTINGS ", padding=8)
+        self.access_advanced_frame.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        self.access_advanced_frame.columnconfigure(1, weight=3)
+        self.access_advanced_frame.columnconfigure(3, weight=2)
+
+        ttk.Label(self.access_advanced_frame, text="SteamCMD Path:").grid(row=0, column=0, sticky="w")
+        ttk.Entry(self.access_advanced_frame, textvariable=self.steamcmd_path).grid(row=0, column=1, sticky="ew", padx=5)
+        path_actions = ttk.Frame(self.access_advanced_frame)
+        path_actions.grid(row=0, column=2, columnspan=2, sticky="e")
+        ttk.Button(path_actions, text="BROWSE", command=self.browse_steamcmd).pack(side="left")
+        ttk.Button(path_actions, text="AUTO-DL", command=self.download_steamcmd).pack(side="left", padx=(5, 0))
+
+        ttk.Label(self.access_advanced_frame, text="Steam Web API Key:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(self.access_advanced_frame, textvariable=self.api_key_var, show="*").grid(row=1, column=1, sticky="ew", padx=5, pady=(6, 0))
+        ttk.Button(self.access_advanced_frame, text="?", command=self.open_api_key_link, width=3).grid(row=1, column=2, sticky="w", padx=(0, 5), pady=(6, 0))
+        self.test_api_key_btn = ttk.Button(self.access_advanced_frame, text="TEST KEY", command=self.test_api_key)
+        self.test_api_key_btn.grid(row=1, column=3, sticky="w", pady=(6, 0))
+
+        owner_row = ttk.Frame(self.access_advanced_frame)
+        owner_row.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ttk.Label(owner_row, text="Workshop Owner:").pack(side="left")
+        self.manage_owner_entry = ttk.Entry(owner_row, textvariable=self.manage_identity_var)
+        self.manage_owner_entry.pack(side="left", fill="x", expand=True, padx=6)
+        self.manage_detect_btn = ttk.Button(owner_row, text="USE CURRENT LOGIN", command=self.use_local_steam_identity)
+        self.manage_detect_btn.pack(side="left")
+        self.resolve_owner_btn = ttk.Button(owner_row, text="RESOLVE", command=self.resolve_owner_identity)
+        self.resolve_owner_btn.pack(side="left", padx=(4, 0))
+
+        native_appid_cb = ttk.Checkbutton(
+            self.access_advanced_frame,
+            text="NATIVE TAGS VIA steam_appid.txt",
+            variable=self.experimental_native_appid_var,
         )
+        native_appid_cb.grid(row=3, column=1, columnspan=3, sticky="w", pady=(5, 0))
 
-        ttk.Label(frame, text="Steam Web API Key:").grid(row=4, column=0, sticky="w", pady=(5, 0))
-        ttk.Entry(frame, textvariable=self.api_key_var, show="*").grid(row=4, column=1, sticky="ew", padx=5, pady=(5, 0))
-        ttk.Button(frame, text="?", command=self.open_api_key_link, width=3).grid(row=4, column=2, sticky="w", padx=(0, 5), pady=(5, 0))
-        self.test_api_key_btn = ttk.Button(frame, text="TEST KEY", command=self.test_api_key)
-        self.test_api_key_btn.grid(row=4, column=3, sticky="w", pady=(5, 0))
-        native_appid_cb = ttk.Checkbutton(frame, text="NATIVE TAGS VIA steam_appid.txt", variable=self.experimental_native_appid_var)
-        native_appid_cb.grid(row=5, column=1, columnspan=3, sticky="w", pady=(5, 0))
+        diagnostics = ttk.Frame(self.access_advanced_frame)
+        diagnostics.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        ttk.Label(diagnostics, textvariable=self.steamcmd_status_var, foreground="#ffff44").pack(side="left", padx=(0, 18))
+        ttk.Label(diagnostics, textvariable=self.api_key_status_var, foreground="#ffff44").pack(side="left", padx=(0, 18))
+        ttk.Button(diagnostics, text="STEAM LOGS", command=self.show_steam_logs).pack(side="right")
 
-        status_row = ttk.Frame(frame)
-        status_row.grid(row=6, column=0, columnspan=4, sticky="ew", pady=(8, 0))
-        for status_var in (
-            self.steamcmd_status_var,
-            self.steam_login_status_var,
-            self.api_key_status_var,
-            self.owner_status_var,
-        ):
-            ttk.Label(status_row, textvariable=status_var, foreground="#ffff44").pack(side="left", padx=(0, 18))
+        self._set_access_advanced(False)
+
+    def _set_access_advanced(self, expanded):
+        self.access_advanced_expanded = bool(expanded)
+        frame = getattr(self, "access_advanced_frame", None)
+        if frame is not None:
+            try:
+                if self.access_advanced_expanded:
+                    frame.grid()
+                else:
+                    frame.grid_remove()
+            except Exception:
+                pass
+        button = getattr(self, "access_toggle_btn", None)
+        if button is not None:
+            try:
+                button.config(text="HIDE ADVANCED" if self.access_advanced_expanded else "SETUP / ADVANCED")
+            except Exception:
+                pass
+
+    def toggle_access_advanced(self):
+        self._set_access_advanced(not self.access_advanced_expanded)
+
 
     def setup_editor_panel(self, parent):
         frame = ttk.LabelFrame(parent, text=" WORKSHOP ITEM EDITOR ", padding=10)
@@ -1774,21 +1830,38 @@ class WorkshopUploader:
         actions.grid(row=11, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         self.upload_btn = ttk.Button(actions, text="REVIEW AND PUBLISH", command=self.start_upload, style="Success.TButton")
         self.upload_btn.pack(side="left", fill="x", expand=True, ipady=6)
-        self.logs_btn = ttk.Button(actions, text="STEAM LOGS", command=self.show_steam_logs)
-        self.logs_btn.pack(side="right", padx=(6, 0))
 
         self._update_upload_mode_indicator()
 
     def setup_readiness_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" 4. READINESS ", padding=10)
-        frame.pack(fill="both", expand=True, pady=(0, 10))
+        frame = ttk.LabelFrame(parent, text=" READINESS ", padding=10)
+        frame.pack(fill="x", pady=(0, 10))
 
-        ttk.Label(frame, textvariable=self.readiness_summary_var, foreground=self.colors["highlight"], font=(self.current_font, 12, "bold")).pack(anchor="w")
-        ttk.Label(frame, textvariable=self.readiness_detail_var, foreground=self.colors["fg"], justify="left").pack(anchor="w", pady=(4, 8))
+        summary_row = ttk.Frame(frame)
+        summary_row.pack(fill="x")
+        ttk.Label(
+            summary_row,
+            textvariable=self.readiness_summary_var,
+            foreground=self.colors["highlight"],
+            font=(self.current_font, 12, "bold"),
+        ).pack(side="left")
+        self.readiness_toggle_btn = ttk.Button(summary_row, text="DETAILS", command=self.toggle_readiness_details)
+        self.readiness_toggle_btn.pack(side="right")
 
-        tree_frame = ttk.Frame(frame)
+        ttk.Label(
+            frame,
+            textvariable=self.readiness_detail_var,
+            foreground=self.colors["fg"],
+            justify="left",
+            wraplength=420,
+        ).pack(anchor="w", pady=(4, 0))
+
+        self.readiness_details_frame = ttk.Frame(frame)
+        self.readiness_details_frame.pack(fill="both", expand=True, pady=(8, 0))
+
+        tree_frame = ttk.Frame(self.readiness_details_frame)
         tree_frame.pack(fill="both", expand=True)
-        self.readiness_tree = ttk.Treeview(tree_frame, columns=("Severity", "Type", "Detail"), show="headings")
+        self.readiness_tree = ttk.Treeview(tree_frame, columns=("Severity", "Type", "Detail"), show="headings", height=8)
         self.readiness_tree.heading("Severity", text="Severity")
         self.readiness_tree.heading("Type", text="Type")
         self.readiness_tree.heading("Detail", text="Detail")
@@ -1800,19 +1873,100 @@ class WorkshopUploader:
         self.readiness_tree.pack(side="left", fill="both", expand=True)
         readiness_scroll.pack(side="right", fill="y")
 
-        actions = ttk.Frame(frame)
+        actions = ttk.Frame(self.readiness_details_frame)
         actions.pack(fill="x", pady=(8, 0))
         ttk.Button(actions, text="OPEN", command=self.open_selected_readiness_file).pack(side="left")
         ttk.Button(actions, text="FIX SELECTED", command=self.apply_selected_readiness_fixes).pack(side="left", padx=4)
         ttk.Button(actions, text="FIX ALL", command=self.apply_all_readiness_fixes).pack(side="left")
         ttk.Button(actions, text="CHANGES", command=self.show_changed_files).pack(side="right")
 
-    def setup_activity_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" ACTIVITY LOG ", padding=10)
-        frame.pack(fill="both", expand=True)
+        self._set_readiness_expanded(False)
 
-        self.log_box = tk.Text(frame, height=12, state="disabled", bg="#050505", fg=self.colors["fg"], font=("Consolas", 9))
+    def _set_readiness_expanded(self, expanded):
+        self.readiness_expanded = bool(expanded)
+        details = getattr(self, "readiness_details_frame", None)
+        if details is not None:
+            try:
+                if self.readiness_expanded:
+                    details.pack(fill="both", expand=True, pady=(8, 0))
+                else:
+                    details.pack_forget()
+            except Exception:
+                pass
+        button = getattr(self, "readiness_toggle_btn", None)
+        if button is not None:
+            try:
+                button.config(text="HIDE DETAILS" if self.readiness_expanded else "DETAILS")
+            except Exception:
+                pass
+
+    def toggle_readiness_details(self):
+        self._set_readiness_expanded(not self.readiness_expanded)
+
+    def setup_activity_panel(self, parent):
+        frame = ttk.LabelFrame(parent, text=" ACTIVITY ", padding=10)
+        frame.pack(fill="x")
+
+        summary_row = ttk.Frame(frame)
+        summary_row.pack(fill="x")
+        ttk.Label(
+            summary_row,
+            textvariable=self.activity_summary_var,
+            foreground=self.colors["fg"],
+            wraplength=360,
+        ).pack(side="left", fill="x", expand=True)
+        self.activity_toggle_btn = ttk.Button(summary_row, text="SHOW LOG", command=self.toggle_activity_log)
+        self.activity_toggle_btn.pack(side="right", padx=(8, 0))
+
+        self.activity_log_frame = ttk.Frame(frame)
+        self.activity_log_frame.pack(fill="both", expand=True, pady=(8, 0))
+        self.log_box = tk.Text(
+            self.activity_log_frame,
+            height=10,
+            state="disabled",
+            bg="#050505",
+            fg=self.colors["fg"],
+            font=("Consolas", 9),
+        )
         self.log_box.pack(fill="both", expand=True)
+        log_actions = ttk.Frame(self.activity_log_frame)
+        log_actions.pack(fill="x", pady=(4, 0))
+        ttk.Button(log_actions, text="CLEAR", command=self.clear_activity_log).pack(side="right")
+
+        self._set_activity_log_expanded(False)
+
+    def _set_activity_log_expanded(self, expanded):
+        self.activity_log_expanded = bool(expanded)
+        frame = getattr(self, "activity_log_frame", None)
+        if frame is not None:
+            try:
+                if self.activity_log_expanded:
+                    frame.pack(fill="both", expand=True, pady=(8, 0))
+                else:
+                    frame.pack_forget()
+            except Exception:
+                pass
+        button = getattr(self, "activity_toggle_btn", None)
+        if button is not None:
+            try:
+                button.config(text="HIDE LOG" if self.activity_log_expanded else "SHOW LOG")
+            except Exception:
+                pass
+
+    def toggle_activity_log(self):
+        self._set_activity_log_expanded(not self.activity_log_expanded)
+
+    def clear_activity_log(self):
+        if hasattr(self, "log_box"):
+            try:
+                self.log_box.config(state="normal")
+                self.log_box.delete("1.0", "end")
+                self.log_box.config(state="disabled")
+            except Exception:
+                pass
+        if hasattr(self, "activity_summary_var"):
+            self.activity_summary_var.set("Activity log cleared.")
+
 
     def _update_title_counter(self, *args):
         count = len(self.title_var.get())
@@ -2064,6 +2218,9 @@ class WorkshopUploader:
         self.root.after(0, lambda: self._log_impl(msg))
 
     def _log_impl(self, msg):
+        summary = " ".join(str(msg or "").splitlines()).strip()
+        if hasattr(self, "activity_summary_var") and summary:
+            self.activity_summary_var.set(summary)
         if not hasattr(self, "log_box"):
             return
         self.log_box.config(state="normal")
@@ -2352,6 +2509,12 @@ class WorkshopUploader:
         show_manual = auth_state in manual_states and not self.use_cached_creds_var.get()
         show_guard = auth_state == "guard_required" and not self.use_cached_creds_var.get()
         show_qr = auth_state in {"sign_in_required", "bad_credentials", "timeout", "failed", "qr_confirmed"}
+        show_auth_actions = auth_state in manual_states or auth_state in {"checking", "mobile_approval", "qr_pending"}
+
+        if show_auth_actions:
+            self.auth_row.grid()
+        else:
+            self.auth_row.grid_remove()
 
         for widget in (self.user_label, self.user_entry, self.pwd_label, self.pwd_entry):
             if show_manual:
