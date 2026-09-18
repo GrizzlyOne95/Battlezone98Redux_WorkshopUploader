@@ -614,8 +614,17 @@ class WorkshopUploader:
             updated = project.get("last_opened", "")
             if "T" in updated:
                 updated = updated.split("T", 1)[0]
-            item_id = project.get("item_id", "0") or "0"
-            self.project_tree.insert("", "end", values=(project_name, item_id, updated), tags=(project.get("profile_path", ""),))
+            item_id = str(project.get("item_id", "0") or "0")
+            item_display = item_id if item_id.isdigit() and item_id != "0" else "New"
+            row_id = self.project_tree.insert(
+                "",
+                "end",
+                values=(project_name, item_display, updated),
+                tags=(project.get("profile_path", ""),),
+            )
+            if project.get("profile_path", "") == self.current_project_profile_path:
+                self.project_tree.selection_set(row_id)
+                self.project_tree.see(row_id)
 
     def _load_project_from_path(self, profile_path):
         data = self.project_store.load_project(profile_path)
