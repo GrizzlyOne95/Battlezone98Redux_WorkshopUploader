@@ -661,6 +661,33 @@ class TestWorkshopUploader(unittest.TestCase):
         second = self.uploader._fingerprint_inventory(self.uploader._build_mod_inventory(self.test_dir))
         self.assertNotEqual(first, second)
 
+    def test_steam_service_detects_configured_steamcmd_first(self):
+        steamcmd_dir = os.path.join(self.test_dir, "steamcmd")
+        os.makedirs(steamcmd_dir, exist_ok=True)
+        steamcmd_path = os.path.join(steamcmd_dir, "steamcmd.exe")
+        with open(steamcmd_path, "w", encoding="utf-8") as f:
+            f.write("stub")
+
+        detected = self.uploader.steam_service.detect_steamcmd(
+            configured_path=steamcmd_path,
+            base_dir=self.test_dir,
+        )
+
+        self.assertEqual(detected, os.path.abspath(steamcmd_path))
+
+    def test_resolving_owner_schedules_library_refresh(self):
+        self.uploader.api_key_var = DummyVar("key")
+        self.uploader.manage_identity_var = DummyVar("grizzly")
+        self.uploader.owner_status_var = DummyVar("")
+        self.uploader.resolve_steam_id = MagicMock(return_value="76561198000000001")
+        self.uploader.refresh_workshop_items = MagicMock()
+        self.uploader.root.after = lambda _delay, fn: fn()
+
+        steam_id = self.uploader.resolve_owner_identity(quiet=False)
+
+        self.assertEqual(steam_id, "76561198000000001")
+        self.uploader.refresh_workshop_items.assert_called_once_with(quiet=True)
+
     def test_extract_loginusers_accounts_vdf_parser(self):
         vdf_content = """
 "users"
