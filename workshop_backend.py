@@ -90,48 +90,51 @@ class WorkshopBackend:
     def query_workshop_items(self, api_key, identity_input, appid, resolve_steam_id):
         steam_id = resolve_steam_id(identity_input, api_key)
         if not steam_id:
-            return None, [], {"pages": 0, "total": 0, "next_cursor": ""}
+            return None, [], {"pages": 0, "total": 0, "next_page": None}
 
-        query_url = "https://api.steampowered.com/IPublishedFileService/QueryFiles/v1/"
-        cursor = "*"
+        query_url = "https://api.steampowered.com/IPublishedFileService/GetUserFiles/v1/"
+        page = 1
         page_count = 0
         total = 0
         items = []
-        seen_cursors = set()
+        seen_ids = set()
 
-        while cursor and cursor not in seen_cursors:
-            seen_cursors.add(cursor)
-            query_payload = {
-                "query_type": 1,
-                "cursor": cursor,
-                "page": 1,
-                "creator_appid": appid,
-                "appid": appid,
-                "numperpage": 100,
-                "return_metadata": 1,
-                "steamid": steam_id,
-            }
+        while page <= 1000:
             response = self.steam_service.request_with_retry(
                 "GET",
                 query_url,
-                operation_name="Query Workshop files",
-                params={"key": api_key, "input_json": json.dumps(query_payload)},
+                operation_name="Get user Workshop files",
+                params={
+                    "key": api_key,
+                    "steamid": steam_id,
+                    "appid": appid,
+                    "page": page,
+                    "numperpage": 100,
+                },
                 timeout=10,
             )
             payload = response.json().get("response", {})
             batch = payload.get("publishedfiledetails", []) or []
-            items.extend(batch)
             page_count += 1
+
             try:
                 total = int(payload.get("total", total or len(items)) or 0)
             except Exception:
                 total = total or len(items)
 
-            next_cursor = str(payload.get("next_cursor", "") or "")
-            if not next_cursor or next_cursor == cursor or not batch:
-                cursor = ""
-            else:
-                cursor = next_cursor
+            new_items = 0
+            for item in batch:
+                item_id = str(item.get("publishedfileid", "") or "")
+                if item_id and item_id in seen_ids:
+                    continue
+                if item_id:
+                    seen_ids.add(item_id)
+                items.append(item)
+                new_items += 1
+
+            if not batch or new_items == 0 or (total and len(items) >= total):
+                break
+            page += 1
 
         normalized = []
         vis_map = {0: "Public", 1: "Friends", 2: "Private"}
@@ -141,16 +144,20 @@ class WorkshopBackend:
                 updated_label = datetime.fromtimestamp(int(updated)).strftime("%Y-%m-%d %H:%M")
             except Exception:
                 updated_label = "Unknown"
+            try:
+                visibility = int(item.get("visibility", -1))
+            except Exception:
+                visibility = -1
             normalized.append({
                 "title": item.get("title", ""),
                 "publishedfileid": item.get("publishedfileid", ""),
-                "visibility_label": vis_map.get(item.get("visibility"), "Unknown"),
+                "visibility_label": vis_map.get(visibility, "Unknown"),
                 "updated_label": updated_label,
             })
         return steam_id, normalized, {
             "pages": page_count,
             "total": total or len(normalized),
-            "next_cursor": cursor,
+            "next_page": page + 1 if total and len(normalized) < total else None,
         }
 
     def fetch_workshop_item_details(self, api_key, item_id):
