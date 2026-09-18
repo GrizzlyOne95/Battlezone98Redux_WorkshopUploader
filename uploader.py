@@ -1823,21 +1823,38 @@ class WorkshopUploader:
         actions.grid(row=11, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         self.upload_btn = ttk.Button(actions, text="REVIEW AND PUBLISH", command=self.start_upload, style="Success.TButton")
         self.upload_btn.pack(side="left", fill="x", expand=True, ipady=6)
-        self.logs_btn = ttk.Button(actions, text="STEAM LOGS", command=self.show_steam_logs)
-        self.logs_btn.pack(side="right", padx=(6, 0))
 
         self._update_upload_mode_indicator()
 
     def setup_readiness_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" 4. READINESS ", padding=10)
-        frame.pack(fill="both", expand=True, pady=(0, 10))
+        frame = ttk.LabelFrame(parent, text=" READINESS ", padding=10)
+        frame.pack(fill="x", pady=(0, 10))
 
-        ttk.Label(frame, textvariable=self.readiness_summary_var, foreground=self.colors["highlight"], font=(self.current_font, 12, "bold")).pack(anchor="w")
-        ttk.Label(frame, textvariable=self.readiness_detail_var, foreground=self.colors["fg"], justify="left").pack(anchor="w", pady=(4, 8))
+        summary_row = ttk.Frame(frame)
+        summary_row.pack(fill="x")
+        ttk.Label(
+            summary_row,
+            textvariable=self.readiness_summary_var,
+            foreground=self.colors["highlight"],
+            font=(self.current_font, 12, "bold"),
+        ).pack(side="left")
+        self.readiness_toggle_btn = ttk.Button(summary_row, text="DETAILS", command=self.toggle_readiness_details)
+        self.readiness_toggle_btn.pack(side="right")
 
-        tree_frame = ttk.Frame(frame)
+        ttk.Label(
+            frame,
+            textvariable=self.readiness_detail_var,
+            foreground=self.colors["fg"],
+            justify="left",
+            wraplength=420,
+        ).pack(anchor="w", pady=(4, 0))
+
+        self.readiness_details_frame = ttk.Frame(frame)
+        self.readiness_details_frame.pack(fill="both", expand=True, pady=(8, 0))
+
+        tree_frame = ttk.Frame(self.readiness_details_frame)
         tree_frame.pack(fill="both", expand=True)
-        self.readiness_tree = ttk.Treeview(tree_frame, columns=("Severity", "Type", "Detail"), show="headings")
+        self.readiness_tree = ttk.Treeview(tree_frame, columns=("Severity", "Type", "Detail"), show="headings", height=8)
         self.readiness_tree.heading("Severity", text="Severity")
         self.readiness_tree.heading("Type", text="Type")
         self.readiness_tree.heading("Detail", text="Detail")
@@ -1849,19 +1866,100 @@ class WorkshopUploader:
         self.readiness_tree.pack(side="left", fill="both", expand=True)
         readiness_scroll.pack(side="right", fill="y")
 
-        actions = ttk.Frame(frame)
+        actions = ttk.Frame(self.readiness_details_frame)
         actions.pack(fill="x", pady=(8, 0))
         ttk.Button(actions, text="OPEN", command=self.open_selected_readiness_file).pack(side="left")
         ttk.Button(actions, text="FIX SELECTED", command=self.apply_selected_readiness_fixes).pack(side="left", padx=4)
         ttk.Button(actions, text="FIX ALL", command=self.apply_all_readiness_fixes).pack(side="left")
         ttk.Button(actions, text="CHANGES", command=self.show_changed_files).pack(side="right")
 
-    def setup_activity_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" ACTIVITY LOG ", padding=10)
-        frame.pack(fill="both", expand=True)
+        self._set_readiness_expanded(False)
 
-        self.log_box = tk.Text(frame, height=12, state="disabled", bg="#050505", fg=self.colors["fg"], font=("Consolas", 9))
+    def _set_readiness_expanded(self, expanded):
+        self.readiness_expanded = bool(expanded)
+        details = getattr(self, "readiness_details_frame", None)
+        if details is not None:
+            try:
+                if self.readiness_expanded:
+                    details.pack(fill="both", expand=True, pady=(8, 0))
+                else:
+                    details.pack_forget()
+            except Exception:
+                pass
+        button = getattr(self, "readiness_toggle_btn", None)
+        if button is not None:
+            try:
+                button.config(text="HIDE DETAILS" if self.readiness_expanded else "DETAILS")
+            except Exception:
+                pass
+
+    def toggle_readiness_details(self):
+        self._set_readiness_expanded(not self.readiness_expanded)
+
+    def setup_activity_panel(self, parent):
+        frame = ttk.LabelFrame(parent, text=" ACTIVITY ", padding=10)
+        frame.pack(fill="x")
+
+        summary_row = ttk.Frame(frame)
+        summary_row.pack(fill="x")
+        ttk.Label(
+            summary_row,
+            textvariable=self.activity_summary_var,
+            foreground=self.colors["fg"],
+            wraplength=360,
+        ).pack(side="left", fill="x", expand=True)
+        self.activity_toggle_btn = ttk.Button(summary_row, text="SHOW LOG", command=self.toggle_activity_log)
+        self.activity_toggle_btn.pack(side="right", padx=(8, 0))
+
+        self.activity_log_frame = ttk.Frame(frame)
+        self.activity_log_frame.pack(fill="both", expand=True, pady=(8, 0))
+        self.log_box = tk.Text(
+            self.activity_log_frame,
+            height=10,
+            state="disabled",
+            bg="#050505",
+            fg=self.colors["fg"],
+            font=("Consolas", 9),
+        )
         self.log_box.pack(fill="both", expand=True)
+        log_actions = ttk.Frame(self.activity_log_frame)
+        log_actions.pack(fill="x", pady=(4, 0))
+        ttk.Button(log_actions, text="CLEAR", command=self.clear_activity_log).pack(side="right")
+
+        self._set_activity_log_expanded(False)
+
+    def _set_activity_log_expanded(self, expanded):
+        self.activity_log_expanded = bool(expanded)
+        frame = getattr(self, "activity_log_frame", None)
+        if frame is not None:
+            try:
+                if self.activity_log_expanded:
+                    frame.pack(fill="both", expand=True, pady=(8, 0))
+                else:
+                    frame.pack_forget()
+            except Exception:
+                pass
+        button = getattr(self, "activity_toggle_btn", None)
+        if button is not None:
+            try:
+                button.config(text="HIDE LOG" if self.activity_log_expanded else "SHOW LOG")
+            except Exception:
+                pass
+
+    def toggle_activity_log(self):
+        self._set_activity_log_expanded(not self.activity_log_expanded)
+
+    def clear_activity_log(self):
+        if hasattr(self, "log_box"):
+            try:
+                self.log_box.config(state="normal")
+                self.log_box.delete("1.0", "end")
+                self.log_box.config(state="disabled")
+            except Exception:
+                pass
+        if hasattr(self, "activity_summary_var"):
+            self.activity_summary_var.set("Activity log cleared.")
+
 
     def _update_title_counter(self, *args):
         count = len(self.title_var.get())
