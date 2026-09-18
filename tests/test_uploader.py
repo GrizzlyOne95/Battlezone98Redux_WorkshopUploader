@@ -603,6 +603,91 @@ class TestWorkshopUploader(unittest.TestCase):
         self.assertEqual(diff["modified"], ["edit.txt"])
         self.assertEqual(diff["removed"], ["gone.txt"])
 
+    def test_access_advanced_panel_collapses_and_expands(self):
+        self.uploader.access_advanced_frame = MagicMock()
+        self.uploader.access_toggle_btn = MagicMock()
+
+        self.uploader._set_access_advanced(False)
+        self.assertFalse(self.uploader.access_advanced_expanded)
+        self.uploader.access_advanced_frame.grid_remove.assert_called()
+        self.assertEqual(
+            self.uploader.access_toggle_btn.config.call_args.kwargs["text"],
+            "SETUP / ADVANCED",
+        )
+
+        self.uploader.access_advanced_frame.reset_mock()
+        self.uploader.access_toggle_btn.reset_mock()
+        self.uploader._set_access_advanced(True)
+        self.assertTrue(self.uploader.access_advanced_expanded)
+        self.uploader.access_advanced_frame.grid.assert_called()
+        self.assertEqual(
+            self.uploader.access_toggle_btn.config.call_args.kwargs["text"],
+            "HIDE ADVANCED",
+        )
+
+    def test_steamcmd_unavailable_surfaces_advanced_setup(self):
+        self.uploader.access_advanced_frame = MagicMock()
+        self.uploader.access_toggle_btn = MagicMock()
+        self.uploader.steam_login_status_var = DummyVar("")
+        self.uploader.auth_detail_var = DummyVar("")
+
+        self.uploader._set_auth_state("steamcmd_unavailable")
+
+        self.assertTrue(self.uploader.access_advanced_expanded)
+        self.uploader.access_advanced_frame.grid.assert_called()
+
+    def test_readiness_auto_collapses_when_ready_and_expands_for_attention(self):
+        self.uploader.mod_path = DummyVar(self.test_dir)
+        self.uploader.readiness_tree = MagicMock()
+        self.uploader.readiness_details_frame = MagicMock()
+        self.uploader.readiness_toggle_btn = MagicMock()
+        self.uploader.readiness_summary_var = DummyVar("")
+        self.uploader.readiness_detail_var = DummyVar("")
+        self.uploader.publish_target_var = DummyVar("")
+        self.uploader.last_upload_var = DummyVar("")
+        self.uploader.changed_since_upload_var = DummyVar("")
+        self.uploader.item_id_var = DummyVar("0")
+        self.uploader.current_project_data = {}
+        self.uploader._build_mod_inventory = MagicMock(return_value=[])
+        self.uploader._fingerprint_inventory = MagicMock(return_value="sig")
+        self.uploader._update_project_status = MagicMock()
+
+        clean = {
+            "issues": [],
+            "validation_errors": [],
+            "validation_warnings": [],
+            "trn_line_endings": [],
+            "trn_duplicate_headers": [],
+            "legacy_files": [],
+        }
+        warning = dict(clean)
+        warning["validation_warnings"] = ["Preview image is large."]
+
+        self.uploader._collect_mod_findings = MagicMock(return_value=clean)
+        self.uploader.refresh_current_project_readiness()
+        self.assertFalse(self.uploader.readiness_expanded)
+        self.uploader.readiness_details_frame.pack_forget.assert_called()
+
+        self.uploader.readiness_details_frame.reset_mock()
+        self.uploader._collect_mod_findings = MagicMock(return_value=warning)
+        self.uploader.refresh_current_project_readiness()
+        self.assertTrue(self.uploader.readiness_expanded)
+        self.uploader.readiness_details_frame.pack.assert_called()
+
+    def test_activity_summary_updates_without_opening_raw_log(self):
+        self.uploader.activity_summary_var = DummyVar("Ready.")
+        self.uploader.activity_log_expanded = False
+        self.uploader.log_box = MagicMock()
+
+        self.uploader._log_impl("Workshop library ready:\n38 items loaded.")
+
+        self.assertEqual(
+            self.uploader.activity_summary_var.get(),
+            "Workshop library ready: 38 items loaded.",
+        )
+        self.assertFalse(self.uploader.activity_log_expanded)
+        self.uploader.log_box.insert.assert_called_once()
+
     def test_build_readiness_rows_marks_fixable_actions(self):
         bad_trn = os.path.join(self.test_dir, "bad.trn")
         legacy_map = os.path.join(self.test_dir, "old.map")
