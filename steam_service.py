@@ -43,8 +43,8 @@ class SteamService:
                 if root:
                     add_candidate(os.path.join(root, "SteamCMD", "steamcmd.exe"))
                     add_candidate(os.path.join(root, "steamcmd", "steamcmd.exe"))
-            add_candidate(r"C:\\steamcmd\\steamcmd.exe")
-            add_candidate(r"C:\\SteamCMD\\steamcmd.exe")
+            add_candidate(r"C:\steamcmd\steamcmd.exe")
+            add_candidate(r"C:\SteamCMD\steamcmd.exe")
         else:
             for path in ("/usr/games/steamcmd", "/usr/bin/steamcmd", "/usr/local/bin/steamcmd", "/opt/steamcmd/steamcmd"):
                 add_candidate(path)
