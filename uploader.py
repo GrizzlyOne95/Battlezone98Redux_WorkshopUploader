@@ -264,7 +264,18 @@ class WorkshopUploader:
         self.root = root
         apply_window_icon(self.root)
         self.root.title("Battlezone Workshop Uploader")
-        self.root.geometry("1360x900")
+        try:
+            screen_w = int(self.root.winfo_screenwidth())
+            screen_h = int(self.root.winfo_screenheight())
+            window_w = max(1120, min(1600, screen_w - 80))
+            window_h = max(700, min(950, screen_h - 80))
+        except Exception:
+            window_w, window_h = 1440, 900
+        self.root.geometry(f"{window_w}x{window_h}")
+        try:
+            self.root.minsize(1080, 680)
+        except Exception:
+            pass
         
         if getattr(sys, 'frozen', False):
             self.base_dir = os.path.dirname(sys.executable)
@@ -1555,9 +1566,9 @@ class WorkshopUploader:
 
         body = ttk.Frame(main_frame)
         body.pack(fill="both", expand=True)
-        body.columnconfigure(0, weight=2)
-        body.columnconfigure(1, weight=5)
-        body.columnconfigure(2, weight=4)
+        body.columnconfigure(0, weight=3, minsize=350)
+        body.columnconfigure(1, weight=5, minsize=560)
+        body.columnconfigure(2, weight=3, minsize=300)
         body.rowconfigure(0, weight=1)
 
         left_col = ttk.Frame(body)
@@ -1666,35 +1677,39 @@ class WorkshopUploader:
             foreground=self.colors["highlight"],
             font=(self.current_font, 11, "bold"),
         ).pack(side="left")
-        ttk.Label(summary_row, textvariable=self.owner_status_var, foreground=self.colors["accent"]).pack(side="left", padx=(16, 0))
-        ttk.Label(summary_row, textvariable=self.api_key_status_var, foreground="#ffff44").pack(side="left", padx=(16, 0))
         self.access_toggle_btn = ttk.Button(summary_row, text="SETUP / ADVANCED", command=self.toggle_access_advanced)
         self.access_toggle_btn.pack(side="right")
+
+        connection_meta = ttk.Frame(frame)
+        connection_meta.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        ttk.Label(connection_meta, textvariable=self.owner_status_var, foreground=self.colors["accent"]).pack(side="left")
+        ttk.Label(connection_meta, textvariable=self.api_key_status_var, foreground="#ffff44").pack(side="left", padx=(16, 0))
 
         ttk.Label(
             frame,
             textvariable=self.auth_detail_var,
             foreground="#ffcc66",
-            wraplength=620,
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(4, 4))
+            wraplength=760,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 4))
 
         self.user_label = ttk.Label(frame, text="Steam Username:")
-        self.user_label.grid(row=2, column=0, sticky="w", pady=5)
+        self.user_label.grid(row=3, column=0, sticky="w", pady=5)
         self.user_entry = ttk.Entry(frame, textvariable=self.username_var)
-        self.user_entry.grid(row=2, column=1, sticky="ew", padx=5, pady=5)
+        self.user_entry.grid(row=3, column=1, sticky="ew", padx=5, pady=5)
 
         self.pwd_label = ttk.Label(frame, text="Password:")
-        self.pwd_label.grid(row=2, column=2, sticky="e", pady=5)
+        self.pwd_label.grid(row=3, column=2, sticky="e", pady=5)
         self.pwd_entry = ttk.Entry(frame, textvariable=self.password_var, show="*")
-        self.pwd_entry.grid(row=2, column=3, sticky="ew", padx=(5, 0), pady=5)
+        self.pwd_entry.grid(row=3, column=3, sticky="ew", padx=(5, 0), pady=5)
 
         self.guard_label = ttk.Label(frame, text="Steam Guard Code:")
-        self.guard_label.grid(row=3, column=0, sticky="w")
+        self.guard_label.grid(row=4, column=0, sticky="w")
         self.guard_entry = ttk.Entry(frame, textvariable=self.steam_guard_var, width=12)
-        self.guard_entry.grid(row=3, column=1, sticky="w", padx=5)
+        self.guard_entry.grid(row=4, column=1, sticky="w", padx=5)
 
         self.auth_row = ttk.Frame(frame)
-        self.auth_row.grid(row=3, column=2, columnspan=2, sticky="w")
+        self.auth_row.grid(row=4, column=2, columnspan=2, sticky="w")
         self.qr_btn = ttk.Button(self.auth_row, text="QR VERIFY", command=self.start_qr_login)
         self.qr_btn.pack(side="left")
         self.cached_cb = ttk.Checkbutton(self.auth_row, text="USE CACHED LOGIN", variable=self.use_cached_creds_var)
@@ -1702,7 +1717,7 @@ class WorkshopUploader:
         self.test_steam_login_btn.pack(side="left", padx=(5, 0))
 
         self.access_advanced_frame = ttk.LabelFrame(frame, text=" ADVANCED STEAM SETTINGS ", padding=8)
-        self.access_advanced_frame.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        self.access_advanced_frame.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         self.access_advanced_frame.columnconfigure(1, weight=3)
         self.access_advanced_frame.columnconfigure(3, weight=2)
 
@@ -1779,11 +1794,6 @@ class WorkshopUploader:
         ttk.Button(top_row, text="NEW ITEM", command=self.set_create_mode).pack(side="right")
         ttk.Button(top_row, text="OPEN PAGE", command=self.open_workshop_page).pack(side="right", padx=4)
 
-        ttk.Label(
-            top_row,
-            text="Select a content folder first; its upload profile opens automatically.",
-            foreground=self.colors["fg"],
-        ).pack(side="left", padx=(16, 0))
         ttk.Label(frame, text="Content Folder:").grid(row=1, column=0, sticky="w")
         ttk.Entry(frame, textvariable=self.mod_path).grid(row=1, column=1, columnspan=3, sticky="ew", padx=5)
         path_btns = ttk.Frame(frame)
@@ -1844,7 +1854,9 @@ class WorkshopUploader:
             textvariable=self.readiness_summary_var,
             foreground=self.colors["highlight"],
             font=(self.current_font, 12, "bold"),
-        ).pack(side="left")
+            wraplength=260,
+            justify="left",
+        ).pack(side="left", fill="x", expand=True)
         self.readiness_toggle_btn = ttk.Button(summary_row, text="DETAILS", command=self.toggle_readiness_details)
         self.readiness_toggle_btn.pack(side="right")
 
@@ -1913,7 +1925,8 @@ class WorkshopUploader:
             summary_row,
             textvariable=self.activity_summary_var,
             foreground=self.colors["fg"],
-            wraplength=360,
+            wraplength=260,
+            justify="left",
         ).pack(side="left", fill="x", expand=True)
         self.activity_toggle_btn = ttk.Button(summary_row, text="SHOW LOG", command=self.toggle_activity_log)
         self.activity_toggle_btn.pack(side="right", padx=(8, 0))
