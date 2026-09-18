@@ -924,17 +924,22 @@ class TestWorkshopUploader(unittest.TestCase):
         )
 
     def test_use_selected_item_id_for_upload_sets_update_target(self):
+        content_dir = os.path.join(self.test_dir, "content")
+        os.makedirs(content_dir, exist_ok=True)
+        self.uploader.mod_path = DummyVar(content_dir)
         self.uploader.item_id_var = DummyVar("0")
         self.uploader.tree = MagicMock()
         self.uploader.tree.selection.return_value = ["item1"]
         self.uploader.tree.item.return_value = {"values": ["My Mod", "999"]}
         self.uploader.notebook = MagicMock()
         self.uploader.upload_tab = MagicMock()
+        self.uploader.save_current_project_state = MagicMock()
 
         ok = self.uploader.use_selected_item_id_for_upload()
         self.assertTrue(ok)
         self.assertEqual(self.uploader.item_id_var.get(), "999")
         self.uploader.notebook.select.assert_called_once()
+        self.uploader.save_current_project_state.assert_called_once_with(quiet=True)
 
     def test_start_upload_cached_credentials_does_not_require_username(self):
         sc_path = os.path.join(self.test_dir, "steamcmd.exe")
