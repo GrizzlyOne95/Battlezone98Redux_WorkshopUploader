@@ -471,7 +471,7 @@ class TestWorkshopUploader(unittest.TestCase):
         snapshot = self.uploader._build_inventory_snapshot(first_inventory)
 
         with open(tracked, "w", encoding="utf-8") as f:
-            f.write("two")
+            f.write("two changed")
         with open(added, "w", encoding="utf-8") as f:
             f.write("new")
 
