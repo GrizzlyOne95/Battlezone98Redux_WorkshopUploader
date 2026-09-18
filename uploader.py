@@ -2510,6 +2510,12 @@ class WorkshopUploader:
         show_manual = auth_state in manual_states and not self.use_cached_creds_var.get()
         show_guard = auth_state == "guard_required" and not self.use_cached_creds_var.get()
         show_qr = auth_state in {"sign_in_required", "bad_credentials", "timeout", "failed", "qr_confirmed"}
+        show_auth_actions = auth_state in manual_states or auth_state in {"checking", "mobile_approval", "qr_pending"}
+
+        if show_auth_actions:
+            self.auth_row.grid()
+        else:
+            self.auth_row.grid_remove()
 
         for widget in (self.user_label, self.user_entry, self.pwd_label, self.pwd_entry):
             if show_manual:
