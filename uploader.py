@@ -363,9 +363,9 @@ class WorkshopUploader:
         self.workshop_backend = WorkshopBackend(self.steam_service, logger=self.log)
         self.memory_analyzer = MemoryAnalyzer(logger=self.log, has_pil=HAS_PIL, image_module=Image if HAS_PIL else None)
         self.content_fixer = ContentFixer(logger=self.log)
-        self.project_name_var = tk.StringVar(value="NO PROJECT")
-        self.project_hint_var = tk.StringVar(value="Select a mod folder to begin.")
-        self.publish_target_var = tk.StringVar(value="TARGET: CREATE NEW ITEM")
+        self.project_name_var = tk.StringVar(value="NO UPLOAD PROFILE")
+        self.project_hint_var = tk.StringVar(value="Select a content folder to begin.")
+        self.publish_target_var = tk.StringVar(value="WORKSHOP ITEM: NEW")
         self.last_upload_var = tk.StringVar(value="LAST PUBLISH: NONE")
         self.changed_since_upload_var = tk.StringVar(value="CHANGED FILES: UNKNOWN")
         self.readiness_summary_var = tk.StringVar(value="Readiness: Select a content folder.")
@@ -575,7 +575,7 @@ class WorkshopUploader:
         mod_path = self.mod_path.get().strip()
         if not mod_path:
             if not quiet:
-                messagebox.showinfo("Project", "Select a content folder before saving project state.")
+                messagebox.showinfo("Upload Profile", "Select a content folder before saving the local upload profile.")
             return None
 
         payload = self._build_project_payload()
@@ -592,7 +592,7 @@ class WorkshopUploader:
         self.project_hint_var.set(os.path.abspath(mod_path))
         self.refresh_recent_projects()
         if not quiet:
-            self.log(f"Saved project state: {os.path.basename(profile_path)}")
+            self.log(f"Saved local upload profile: {os.path.basename(profile_path)}")
         return profile_path
 
     def refresh_recent_projects(self):
@@ -646,7 +646,7 @@ class WorkshopUploader:
             return False
         selected = self.project_tree.selection()
         if not selected:
-            messagebox.showinfo("Project", "Select a saved project first.")
+            messagebox.showinfo("Upload Profile", "Select a local upload profile first.")
             return False
 
         tags = self.project_tree.item(selected[0]).get("tags", [])
@@ -654,7 +654,7 @@ class WorkshopUploader:
             return False
         self._load_project_from_path(tags[0])
         self.refresh_current_project_readiness()
-        self.log(f"Loaded project: {os.path.basename(tags[0])}")
+        self.log(f"Opened local upload profile: {os.path.basename(tags[0])}")
         return True
 
     def _handle_new_project_created(self, project_path):
@@ -667,8 +667,8 @@ class WorkshopUploader:
         if not hasattr(self, "project_name_var"):
             return
         if not mod_path:
-            self.project_name_var.set("NO PROJECT")
-            self.project_hint_var.set("Select a mod folder to begin.")
+            self.project_name_var.set("NO UPLOAD PROFILE")
+            self.project_hint_var.set("Select a content folder to begin.")
             return
 
         matched = self.project_store.find_by_mod_path(mod_path)
@@ -783,9 +783,9 @@ class WorkshopUploader:
         project = self.current_project_data or {}
         item_id = self.item_id_var.get().strip()
         if item_id.isdigit() and item_id != "0":
-            self.publish_target_var.set(f"TARGET: UPDATE ITEM {item_id}")
+            self.publish_target_var.set(f"WORKSHOP ITEM: #{item_id}")
         else:
-            self.publish_target_var.set("TARGET: CREATE NEW ITEM")
+            self.publish_target_var.set("WORKSHOP ITEM: NEW")
 
         last_upload_at = project.get("last_upload_at")
         if last_upload_at:
@@ -1509,11 +1509,17 @@ class WorkshopUploader:
         self.manage_tab = None
 
     def setup_project_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" PROJECTS ", padding=10)
+        frame = ttk.LabelFrame(parent, text=" LOCAL UPLOAD PROFILES ", padding=10)
         frame.pack(fill="both", expand=True, pady=(0, 10))
 
         ttk.Label(frame, textvariable=self.project_name_var, font=(self.current_font, 12, "bold"), foreground=self.colors["highlight"]).pack(anchor="w")
-        ttk.Label(frame, text="Saved local projects paired to Workshop items when available.", foreground=self.colors["fg"]).pack(anchor="w", pady=(2, 8))
+        ttk.Label(
+            frame,
+            text="One local profile per content folder. Selecting a folder opens or creates its profile automatically.",
+            foreground=self.colors["fg"],
+            wraplength=300,
+            justify="left",
+        ).pack(anchor="w", pady=(2, 8))
 
         filter_row = ttk.Frame(frame)
         filter_row.pack(fill="x", pady=(0, 6))
@@ -1525,7 +1531,7 @@ class WorkshopUploader:
         tree_frame = ttk.Frame(frame)
         tree_frame.pack(fill="both", expand=True)
         self.project_tree = ttk.Treeview(tree_frame, columns=("Name", "Item", "Updated"), show="headings", height=10)
-        self.project_tree.heading("Name", text="Project")
+        self.project_tree.heading("Name", text="Profile")
         self.project_tree.heading("Item", text="Workshop ID")
         self.project_tree.heading("Updated", text="Last Opened")
         self.project_tree.column("Name", width=180)
@@ -1540,21 +1546,21 @@ class WorkshopUploader:
         btn_row = ttk.Frame(frame)
         btn_row.pack(fill="x", pady=(8, 0))
         ttk.Button(btn_row, text="OPEN", command=self.open_selected_project).pack(side="left")
-        ttk.Button(btn_row, text="SAVE", command=self.save_current_project_state).pack(side="left", padx=4)
+        ttk.Button(btn_row, text="SELECT FOLDER", command=self.browse_content).pack(side="left", padx=4)
         ttk.Button(btn_row, text="EXPORT", command=self.save_profile).pack(side="right")
         ttk.Button(btn_row, text="IMPORT", command=self.load_profile).pack(side="right", padx=4)
 
     def setup_library_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" 2. WORKSHOP LIBRARY ", padding=10)
+        frame = ttk.LabelFrame(parent, text=" YOUR WORKSHOP ITEMS ", padding=10)
         frame.pack(fill="both", expand=True)
 
         ctrl_row = ttk.Frame(frame)
         ctrl_row.pack(fill="x", pady=(0, 6))
         self.refresh_btn = ttk.Button(ctrl_row, text="REFRESH", command=self.refresh_workshop_items)
         self.refresh_btn.pack(side="left")
-        self.manage_set_target_btn = ttk.Button(ctrl_row, text="PAIR", command=self.use_selected_item_id_for_upload)
+        self.manage_set_target_btn = ttk.Button(ctrl_row, text="USE ITEM", command=self.use_selected_item_id_for_upload)
         self.manage_set_target_btn.pack(side="left", padx=4)
-        self.manage_update_btn = ttk.Button(ctrl_row, text="LOAD DETAILS", command=self.prepare_update)
+        self.manage_update_btn = ttk.Button(ctrl_row, text="LOAD ITEM", command=self.prepare_update)
         self.manage_update_btn.pack(side="left")
 
         identity_row = ttk.Frame(frame)
@@ -1585,7 +1591,6 @@ class WorkshopUploader:
         self.tree.configure(yscrollcommand=lib_scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
         lib_scroll.pack(side="right", fill="y")
-        self.tree.bind("<<TreeviewSelect>>", self._on_manage_selection)
         self.tree.bind("<Double-1>", lambda _e: self.prepare_update())
 
     def setup_access_panel(self, parent):
@@ -1647,7 +1652,7 @@ class WorkshopUploader:
             ttk.Label(status_row, textvariable=status_var, foreground="#ffff44").pack(side="left", padx=(0, 18))
 
     def setup_editor_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text=" 3. PROJECT WORKSPACE ", padding=10)
+        frame = ttk.LabelFrame(parent, text=" WORKSHOP ITEM EDITOR ", padding=10)
         frame.pack(fill="both", expand=True)
         frame.columnconfigure(1, weight=3)
         frame.columnconfigure(3, weight=2)
@@ -1656,15 +1661,20 @@ class WorkshopUploader:
         top_row.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 10))
         self.upload_mode_label = ttk.Label(top_row, text="", foreground=self.colors["highlight"], font=(self.current_font, 11, "bold"))
         self.upload_mode_label.pack(side="left")
-        ttk.Button(top_row, text="NEW TARGET", command=self.set_create_mode).pack(side="right")
+        ttk.Button(top_row, text="NEW ITEM", command=self.set_create_mode).pack(side="right")
         ttk.Button(top_row, text="OPEN PAGE", command=self.open_workshop_page).pack(side="right", padx=4)
 
         ttk.Label(frame, text="Content Folder:").grid(row=1, column=0, sticky="w")
+        ttk.Label(
+            frame,
+            text="Choose the content folder first; its local upload profile opens automatically.",
+            foreground=self.colors["fg"],
+        ).grid(row=0, column=1, columnspan=3, sticky="w", pady=(0, 6))
         ttk.Entry(frame, textvariable=self.mod_path).grid(row=1, column=1, columnspan=3, sticky="ew", padx=5)
         path_btns = ttk.Frame(frame)
         path_btns.grid(row=2, column=1, columnspan=3, sticky="w", pady=(4, 8))
-        ttk.Button(path_btns, text="BROWSE", command=self.browse_content).pack(side="left")
-        ttk.Button(path_btns, text="NEW", command=self.open_template_wizard).pack(side="left", padx=4)
+        ttk.Button(path_btns, text="SELECT FOLDER", command=self.browse_content).pack(side="left")
+        ttk.Button(path_btns, text="NEW CONTENT", command=self.open_template_wizard).pack(side="left", padx=4)
         ttk.Button(path_btns, text="ANALYZE", command=self.analyze_memory_usage).pack(side="left")
         ttk.Button(path_btns, text="RESCAN", command=self.refresh_current_project_readiness).pack(side="left", padx=4)
 
@@ -1765,17 +1775,17 @@ class WorkshopUploader:
 
     def _update_upload_mode_indicator(self, *args):
         item_id = self.item_id_var.get().strip()
-        is_update = item_id.isdigit() and item_id != "0"
-        text = f"MODE: UPDATE EXISTING ITEM ({item_id})" if is_update else "MODE: CREATE NEW ITEM"
-        color = "#ffcc66" if is_update else self.colors["highlight"]
+        is_existing = item_id.isdigit() and item_id != "0"
+        text = f"WORKSHOP ITEM #{item_id}" if is_existing else "NEW WORKSHOP ITEM"
+        color = "#ffcc66" if is_existing else self.colors["highlight"]
         if hasattr(self, "upload_mode_label"):
             self.upload_mode_label.config(text=text, foreground=color)
         if hasattr(self, "publish_target_var"):
-            self.publish_target_var.set(f"TARGET: UPDATE ITEM {item_id}" if is_update else "TARGET: CREATE NEW ITEM")
+            self.publish_target_var.set(f"WORKSHOP ITEM: #{item_id}" if is_existing else "WORKSHOP ITEM: NEW")
 
     def set_create_mode(self):
         self.item_id_var.set("0")
-        self.log("Upload mode set to CREATE NEW ITEM.")
+        self.log("Workshop item link cleared; the next publish will create a new item.")
 
     def _friendly_api_error(self, error=None, response=None):
         return self._get_steam_service().friendly_api_error(error=error, response=response)
@@ -2619,7 +2629,7 @@ class WorkshopUploader:
         self.save_current_project_state(quiet=True)
 
         if not quiet:
-            self.log(f"Project paired to Workshop ID {item_id}: {title}")
+            self.log(f"Upload profile linked to Workshop item {item_id}: {title}")
         return True
 
     def _resolve_vanity_to_steamid(self, vanity, api_key):
