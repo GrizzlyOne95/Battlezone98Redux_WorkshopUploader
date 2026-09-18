@@ -1802,42 +1802,39 @@ class WorkshopUploader:
         ttk.Button(path_btns, text="NEW CONTENT", command=self.open_template_wizard).pack(side="left", padx=4)
         ttk.Button(path_btns, text="ANALYZE", command=self.analyze_memory_usage).pack(side="left")
         ttk.Button(path_btns, text="RESCAN", command=self.refresh_current_project_readiness).pack(side="left", padx=4)
+        watch_cb = ttk.Checkbutton(path_btns, text="WATCH", variable=self.watch_mode_var, command=self.toggle_watch_mode)
+        watch_cb.pack(side="left", padx=(8, 0))
 
-        watch_row = ttk.Frame(frame)
-        watch_row.grid(row=3, column=1, columnspan=3, sticky="w", pady=(0, 8))
-        watch_cb = ttk.Checkbutton(watch_row, text="WATCH FOR CHANGES", variable=self.watch_mode_var, command=self.toggle_watch_mode)
-        watch_cb.pack(side="left")
+        ttk.Label(frame, text="Preview Image:").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Entry(frame, textvariable=self.preview_path).grid(row=3, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
+        ttk.Button(frame, text="BROWSE", command=self.browse_preview).grid(row=3, column=3, sticky="e", pady=5)
 
-        ttk.Label(frame, text="Preview Image:").grid(row=4, column=0, sticky="w", pady=5)
-        ttk.Entry(frame, textvariable=self.preview_path).grid(row=4, column=1, columnspan=2, sticky="ew", padx=5, pady=5)
-        ttk.Button(frame, text="BROWSE", command=self.browse_preview).grid(row=4, column=3, sticky="e", pady=5)
-
-        ttk.Label(frame, text="Title:").grid(row=5, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=self.title_var).grid(row=5, column=1, columnspan=2, sticky="ew", padx=5)
+        ttk.Label(frame, text="Title:").grid(row=4, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.title_var).grid(row=4, column=1, columnspan=2, sticky="ew", padx=5)
         self.title_char_label = ttk.Label(frame, text=f"0 / {STEAM_TITLE_LIMIT}")
-        self.title_char_label.grid(row=5, column=3, sticky="w")
+        self.title_char_label.grid(row=4, column=3, sticky="w")
 
-        ttk.Label(frame, text="Description:").grid(row=6, column=0, sticky="nw", pady=5)
-        self.desc_text = tk.Text(frame, height=10, bg="#1a1a1a", fg=self.colors["accent"], insertbackground=self.colors["highlight"], font=("Consolas", 10))
-        self.desc_text.grid(row=6, column=1, columnspan=3, sticky="nsew", padx=5, pady=5)
+        ttk.Label(frame, text="Description:").grid(row=5, column=0, sticky="nw", pady=5)
+        self.desc_text = tk.Text(frame, height=8, bg="#1a1a1a", fg=self.colors["accent"], insertbackground=self.colors["highlight"], font=("Consolas", 10))
+        self.desc_text.grid(row=5, column=1, columnspan=3, sticky="nsew", padx=5, pady=5)
         self.desc_text.bind("<KeyRelease>", self._on_description_changed)
 
         self.desc_char_label = ttk.Label(frame, text=f"0 / {STEAM_DESC_LIMIT}")
-        self.desc_char_label.grid(row=7, column=3, sticky="e", padx=5)
+        self.desc_char_label.grid(row=6, column=3, sticky="e", padx=5)
 
-        ttk.Label(frame, text="Visibility:").grid(row=8, column=0, sticky="w", pady=5)
-        ttk.Combobox(frame, textvariable=self.visibility_var, values=["0 (Public)", "1 (Friends)", "2 (Private)"], state="readonly", width=16).grid(row=8, column=1, sticky="w", padx=5, pady=5)
-        ttk.Label(frame, text="Workshop ID:").grid(row=8, column=2, sticky="e")
-        ttk.Entry(frame, textvariable=self.item_id_var, width=18).grid(row=8, column=3, sticky="w", padx=5)
+        ttk.Label(frame, text="Visibility:").grid(row=7, column=0, sticky="w", pady=5)
+        ttk.Combobox(frame, textvariable=self.visibility_var, values=["0 (Public)", "1 (Friends)", "2 (Private)"], state="readonly", width=16).grid(row=7, column=1, sticky="w", padx=5, pady=5)
+        ttk.Label(frame, text="Workshop ID:").grid(row=7, column=2, sticky="e")
+        ttk.Entry(frame, textvariable=self.item_id_var, width=18).grid(row=7, column=3, sticky="w", padx=5)
 
-        ttk.Label(frame, text="Change Note:").grid(row=9, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=self.note_var).grid(row=9, column=1, columnspan=3, sticky="ew", padx=5)
+        ttk.Label(frame, text="Change Note:").grid(row=8, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.note_var).grid(row=8, column=1, columnspan=3, sticky="ew", padx=5)
 
-        ttk.Label(frame, text="Tags:").grid(row=10, column=0, sticky="w")
-        ttk.Entry(frame, textvariable=self.tags_var).grid(row=10, column=1, columnspan=3, sticky="ew", padx=5)
+        ttk.Label(frame, text="Tags:").grid(row=9, column=0, sticky="w")
+        ttk.Entry(frame, textvariable=self.tags_var).grid(row=9, column=1, columnspan=3, sticky="ew", padx=5)
 
         actions = ttk.Frame(frame)
-        actions.grid(row=11, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        actions.grid(row=10, column=0, columnspan=4, sticky="ew", pady=(12, 0))
         self.upload_btn = ttk.Button(actions, text="REVIEW AND PUBLISH", command=self.start_upload, style="Success.TButton")
         self.upload_btn.pack(side="left", fill="x", expand=True, ipady=6)
 
@@ -1849,16 +1846,17 @@ class WorkshopUploader:
 
         summary_row = ttk.Frame(frame)
         summary_row.pack(fill="x")
+        summary_row.columnconfigure(0, weight=1)
         ttk.Label(
             summary_row,
             textvariable=self.readiness_summary_var,
             foreground=self.colors["highlight"],
             font=(self.current_font, 12, "bold"),
-            wraplength=260,
+            wraplength=240,
             justify="left",
-        ).pack(side="left", fill="x", expand=True)
+        ).grid(row=0, column=0, sticky="ew")
         self.readiness_toggle_btn = ttk.Button(summary_row, text="DETAILS", command=self.toggle_readiness_details)
-        self.readiness_toggle_btn.pack(side="right")
+        self.readiness_toggle_btn.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
         ttk.Label(
             frame,
@@ -1921,15 +1919,16 @@ class WorkshopUploader:
 
         summary_row = ttk.Frame(frame)
         summary_row.pack(fill="x")
+        summary_row.columnconfigure(0, weight=1)
         ttk.Label(
             summary_row,
             textvariable=self.activity_summary_var,
             foreground=self.colors["fg"],
-            wraplength=260,
+            wraplength=220,
             justify="left",
-        ).pack(side="left", fill="x", expand=True)
-        self.activity_toggle_btn = ttk.Button(summary_row, text="SHOW LOG", command=self.toggle_activity_log)
-        self.activity_toggle_btn.pack(side="right", padx=(8, 0))
+        ).grid(row=0, column=0, sticky="ew")
+        self.activity_toggle_btn = ttk.Button(summary_row, text="LOG", command=self.toggle_activity_log)
+        self.activity_toggle_btn.grid(row=0, column=1, sticky="e", padx=(8, 0))
 
         self.activity_log_frame = ttk.Frame(frame)
         self.activity_log_frame.pack(fill="both", expand=True, pady=(8, 0))
@@ -1962,7 +1961,7 @@ class WorkshopUploader:
         button = getattr(self, "activity_toggle_btn", None)
         if button is not None:
             try:
-                button.config(text="HIDE LOG" if self.activity_log_expanded else "SHOW LOG")
+                button.config(text="HIDE" if self.activity_log_expanded else "LOG")
             except Exception:
                 pass
 
