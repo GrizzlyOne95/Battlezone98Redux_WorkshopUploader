@@ -260,37 +260,13 @@ class TestWorkshopUploader(unittest.TestCase):
 
     def test_workshop_backend_queries_all_workshop_pages(self):
         first = MagicMock()
-        first.json.return_value = {
-            "response": {
-                "total": 2,
-                "next_cursor": "page-2",
-                "publishedfiledetails": [{
-                    "title": "One",
-                    "publishedfileid": "111",
-                    "visibility": 0,
-                    "time_updated": 1700000000,
-                }],
-            }
-        }
+        first.json.return_value = {"response": {"total": 2, "publishedfiledetails": [{"title": "One", "publishedfileid": "111", "visibility": 0, "time_updated": 1700000000}]}}
         second = MagicMock()
-        second.json.return_value = {
-            "response": {
-                "total": 2,
-                "next_cursor": "",
-                "publishedfiledetails": [{
-                    "title": "Two",
-                    "publishedfileid": "222",
-                    "visibility": 2,
-                    "time_updated": 1700000100,
-                }],
-            }
-        }
+        second.json.return_value = {"response": {"total": 2, "publishedfiledetails": [{"title": "Two", "publishedfileid": "222", "visibility": 2, "time_updated": 1700000100}]}}
         self.uploader.workshop_backend.steam_service.request_with_retry = MagicMock(side_effect=[first, second])
 
         steam_id, items, meta = self.uploader.workshop_backend.query_workshop_items(
-            api_key="key",
-            identity_input="76561198000000001",
-            appid="301650",
+            api_key="key", identity_input="76561198000000001", appid="301650",
             resolve_steam_id=lambda identity, _key: identity,
         )
 
@@ -299,11 +275,11 @@ class TestWorkshopUploader(unittest.TestCase):
         self.assertEqual(meta["pages"], 2)
         self.assertEqual(meta["total"], 2)
         calls = self.uploader.workshop_backend.steam_service.request_with_retry.call_args_list
-        first_payload = json.loads(calls[0].kwargs["params"]["input_json"])
-        second_payload = json.loads(calls[1].kwargs["params"]["input_json"])
-        self.assertEqual(first_payload["cursor"], "*")
-        self.assertEqual(second_payload["cursor"], "page-2")
-        self.assertEqual(first_payload["query_type"], 1)
+        self.assertIn("IPublishedFileService/GetUserFiles", calls[0].args[1])
+        self.assertEqual(calls[0].kwargs["params"]["page"], 1)
+        self.assertEqual(calls[1].kwargs["params"]["page"], 2)
+        self.assertEqual(calls[0].kwargs["params"]["steamid"], "76561198000000001")
+        self.assertEqual(calls[0].kwargs["params"]["appid"], "301650")
 
     def test_workshop_backend_fetches_details_from_remote_storage_endpoint(self):
         response = MagicMock()
