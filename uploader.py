@@ -1633,18 +1633,7 @@ class WorkshopUploader:
         self.manage_update_btn = ttk.Button(ctrl_row, text="LOAD ITEM", command=self.prepare_update)
         self.manage_update_btn.pack(side="left")
 
-        identity_row = ttk.Frame(frame)
-        identity_row.pack(fill="x", pady=(0, 6))
-        ttk.Label(identity_row, text="Owner:").pack(side="left")
-        self.manage_owner_entry = ttk.Entry(identity_row, textvariable=self.manage_identity_var)
-        self.manage_owner_entry.pack(side="left", fill="x", expand=True, padx=6)
-        self.manage_detect_btn = ttk.Button(identity_row, text="USE CURRENT LOGIN", command=self.use_local_steam_identity)
-        self.manage_detect_btn.pack(side="left")
-        self.resolve_owner_btn = ttk.Button(identity_row, text="RESOLVE", command=self.resolve_owner_identity)
-        self.resolve_owner_btn.pack(side="left", padx=(4, 0))
-
         ttk.Label(frame, textvariable=self.library_status_var, foreground="#ffff44").pack(anchor="w", pady=(0, 6))
-        ttk.Label(frame, textvariable=self.owner_status_var, foreground=self.colors["accent"]).pack(anchor="w", pady=(0, 6))
 
         tree_frame = ttk.Frame(frame)
         tree_frame.pack(fill="both", expand=True)
@@ -1730,15 +1719,25 @@ class WorkshopUploader:
         self.test_api_key_btn = ttk.Button(self.access_advanced_frame, text="TEST KEY", command=self.test_api_key)
         self.test_api_key_btn.grid(row=1, column=3, sticky="w", pady=(6, 0))
 
+        owner_row = ttk.Frame(self.access_advanced_frame)
+        owner_row.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        ttk.Label(owner_row, text="Workshop Owner:").pack(side="left")
+        self.manage_owner_entry = ttk.Entry(owner_row, textvariable=self.manage_identity_var)
+        self.manage_owner_entry.pack(side="left", fill="x", expand=True, padx=6)
+        self.manage_detect_btn = ttk.Button(owner_row, text="USE CURRENT LOGIN", command=self.use_local_steam_identity)
+        self.manage_detect_btn.pack(side="left")
+        self.resolve_owner_btn = ttk.Button(owner_row, text="RESOLVE", command=self.resolve_owner_identity)
+        self.resolve_owner_btn.pack(side="left", padx=(4, 0))
+
         native_appid_cb = ttk.Checkbutton(
             self.access_advanced_frame,
             text="NATIVE TAGS VIA steam_appid.txt",
             variable=self.experimental_native_appid_var,
         )
-        native_appid_cb.grid(row=2, column=1, columnspan=3, sticky="w", pady=(5, 0))
+        native_appid_cb.grid(row=3, column=1, columnspan=3, sticky="w", pady=(5, 0))
 
         diagnostics = ttk.Frame(self.access_advanced_frame)
-        diagnostics.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(8, 0))
+        diagnostics.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(8, 0))
         ttk.Label(diagnostics, textvariable=self.steamcmd_status_var, foreground="#ffff44").pack(side="left", padx=(0, 18))
         ttk.Label(diagnostics, textvariable=self.api_key_status_var, foreground="#ffff44").pack(side="left", padx=(0, 18))
         ttk.Button(diagnostics, text="STEAM LOGS", command=self.show_steam_logs).pack(side="right")
