@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 import time
 
 import requests
@@ -12,6 +13,67 @@ class SteamService:
     def log(self, msg):
         if self.logger:
             self.logger(msg)
+
+    def detect_steamcmd(self, configured_path="", base_dir=""):
+        candidates = []
+
+        def add_candidate(path):
+            path = (path or "").strip().strip('"')
+            if path and path not in candidates:
+                candidates.append(path)
+
+        add_candidate(configured_path)
+        add_candidate(os.environ.get("STEAMCMD", ""))
+
+        for executable_name in ("steamcmd.exe", "steamcmd"):
+            add_candidate(shutil.which(executable_name))
+
+        executable_name = "steamcmd.exe" if os.name == "nt" else "steamcmd"
+        if base_dir:
+            add_candidate(os.path.join(base_dir, "steamcmd", executable_name))
+            add_candidate(os.path.join(base_dir, executable_name))
+
+        home_dir = os.path.expanduser("~")
+        add_candidate(os.path.join(home_dir, "steamcmd", executable_name))
+        add_candidate(os.path.join(home_dir, "SteamCMD", executable_name))
+
+        if os.name == "nt":
+            for env_var in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"):
+                root = os.environ.get(env_var, "")
+                if root:
+                    add_candidate(os.path.join(root, "SteamCMD", "steamcmd.exe"))
+                    add_candidate(os.path.join(root, "steamcmd", "steamcmd.exe"))
+            add_candidate(r"C:\steamcmd\steamcmd.exe")
+            add_candidate(r"C:\SteamCMD\steamcmd.exe")
+        else:
+            for path in ("/usr/games/steamcmd", "/usr/bin/steamcmd", "/usr/local/bin/steamcmd", "/opt/steamcmd/steamcmd"):
+                add_candidate(path)
+
+        for path in candidates:
+            expanded = os.path.abspath(os.path.expandvars(os.path.expanduser(path)))
+            if os.path.isfile(expanded):
+                return expanded
+        return ""
+
+    def detect_cached_steamcmd_identity(self, steamcmd_exe):
+        if not steamcmd_exe:
+            return None
+
+        vdf_path = os.path.join(os.path.dirname(os.path.abspath(steamcmd_exe)), "config", "loginusers.vdf")
+        if not os.path.exists(vdf_path):
+            return None
+
+        try:
+            accounts = self.extract_loginusers_accounts(vdf_path)
+        except Exception:
+            return None
+        if not accounts:
+            return None
+
+        accounts.sort(key=lambda a: (a.get("most_recent") != "1", a.get("account_name", "")))
+        account = accounts[0]
+        account["source"] = vdf_path
+        return account
 
     def friendly_api_error(self, error=None, response=None):
         if response is None and error is not None:

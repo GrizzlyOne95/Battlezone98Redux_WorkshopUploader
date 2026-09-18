@@ -260,37 +260,13 @@ class TestWorkshopUploader(unittest.TestCase):
 
     def test_workshop_backend_queries_all_workshop_pages(self):
         first = MagicMock()
-        first.json.return_value = {
-            "response": {
-                "total": 2,
-                "next_cursor": "page-2",
-                "publishedfiledetails": [{
-                    "title": "One",
-                    "publishedfileid": "111",
-                    "visibility": 0,
-                    "time_updated": 1700000000,
-                }],
-            }
-        }
+        first.json.return_value = {"response": {"total": 2, "publishedfiledetails": [{"title": "One", "publishedfileid": "111", "visibility": 0, "time_updated": 1700000000}]}}
         second = MagicMock()
-        second.json.return_value = {
-            "response": {
-                "total": 2,
-                "next_cursor": "",
-                "publishedfiledetails": [{
-                    "title": "Two",
-                    "publishedfileid": "222",
-                    "visibility": 2,
-                    "time_updated": 1700000100,
-                }],
-            }
-        }
+        second.json.return_value = {"response": {"total": 2, "publishedfiledetails": [{"title": "Two", "publishedfileid": "222", "visibility": 2, "time_updated": 1700000100}]}}
         self.uploader.workshop_backend.steam_service.request_with_retry = MagicMock(side_effect=[first, second])
 
         steam_id, items, meta = self.uploader.workshop_backend.query_workshop_items(
-            api_key="key",
-            identity_input="76561198000000001",
-            appid="301650",
+            api_key="key", identity_input="76561198000000001", appid="301650",
             resolve_steam_id=lambda identity, _key: identity,
         )
 
@@ -299,11 +275,11 @@ class TestWorkshopUploader(unittest.TestCase):
         self.assertEqual(meta["pages"], 2)
         self.assertEqual(meta["total"], 2)
         calls = self.uploader.workshop_backend.steam_service.request_with_retry.call_args_list
-        first_payload = json.loads(calls[0].kwargs["params"]["input_json"])
-        second_payload = json.loads(calls[1].kwargs["params"]["input_json"])
-        self.assertEqual(first_payload["cursor"], "*")
-        self.assertEqual(second_payload["cursor"], "page-2")
-        self.assertEqual(first_payload["query_type"], 1)
+        self.assertIn("IPublishedFileService/GetUserFiles", calls[0].args[1])
+        self.assertEqual(calls[0].kwargs["params"]["page"], 1)
+        self.assertEqual(calls[1].kwargs["params"]["page"], 2)
+        self.assertEqual(calls[0].kwargs["params"]["steamid"], "76561198000000001")
+        self.assertEqual(calls[0].kwargs["params"]["appid"], "301650")
 
     def test_workshop_backend_fetches_details_from_remote_storage_endpoint(self):
         response = MagicMock()
@@ -684,6 +660,50 @@ class TestWorkshopUploader(unittest.TestCase):
 
         second = self.uploader._fingerprint_inventory(self.uploader._build_mod_inventory(self.test_dir))
         self.assertNotEqual(first, second)
+
+    def test_steam_service_detects_configured_steamcmd_first(self):
+        steamcmd_dir = os.path.join(self.test_dir, "steamcmd")
+        os.makedirs(steamcmd_dir, exist_ok=True)
+        steamcmd_path = os.path.join(steamcmd_dir, "steamcmd.exe")
+        with open(steamcmd_path, "w", encoding="utf-8") as f:
+            f.write("stub")
+
+        detected = self.uploader.steam_service.detect_steamcmd(
+            configured_path=steamcmd_path,
+            base_dir=self.test_dir,
+        )
+
+        self.assertEqual(detected, os.path.abspath(steamcmd_path))
+
+    def test_steam_service_detects_cached_steamcmd_identity(self):
+        steamcmd_dir = os.path.join(self.test_dir, "steamcmd")
+        config_dir = os.path.join(steamcmd_dir, "config")
+        os.makedirs(config_dir, exist_ok=True)
+        steamcmd_path = os.path.join(steamcmd_dir, "steamcmd.exe")
+        with open(steamcmd_path, "w", encoding="utf-8") as f:
+            f.write("stub")
+        loginusers = os.path.join(config_dir, "loginusers.vdf")
+        with open(loginusers, "w", encoding="utf-8") as f:
+            f.write('"users"\n{\n"76561198000000001"\n{\n"AccountName" "alpha"\n"PersonaName" "Alpha User"\n"MostRecent" "1"\n}\n}\n')
+
+        account = self.uploader.steam_service.detect_cached_steamcmd_identity(steamcmd_path)
+
+        self.assertIsNotNone(account)
+        self.assertEqual(account["steamid"], "76561198000000001")
+        self.assertEqual(account["account_name"], "alpha")
+
+    def test_resolving_owner_schedules_library_refresh(self):
+        self.uploader.api_key_var = DummyVar("key")
+        self.uploader.manage_identity_var = DummyVar("grizzly")
+        self.uploader.owner_status_var = DummyVar("")
+        self.uploader.resolve_steam_id = MagicMock(return_value="76561198000000001")
+        self.uploader.refresh_workshop_items = MagicMock()
+        self.uploader.root.after = lambda _delay, fn: fn()
+
+        steam_id = self.uploader.resolve_owner_identity(quiet=False)
+
+        self.assertEqual(steam_id, "76561198000000001")
+        self.uploader.refresh_workshop_items.assert_called_once_with(quiet=True)
 
     def test_extract_loginusers_accounts_vdf_parser(self):
         vdf_content = """

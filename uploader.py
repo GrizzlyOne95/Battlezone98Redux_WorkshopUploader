@@ -387,6 +387,7 @@ class WorkshopUploader:
         self._toggle_auth_fields()
         self._refresh_steamcmd_status()
         self._on_api_key_changed()
+        self.root.after(0, self._bootstrap_steam_environment)
 
         # Apply theme
         self.root.configure(bg=self.colors["bg"])
@@ -1223,6 +1224,7 @@ class WorkshopUploader:
             if ok:
                 self.root.after(0, lambda: self.api_key_status_var.set("API key: verified"))
                 self.root.after(0, lambda: self.log(detail))
+                self.root.after(0, lambda: self.refresh_workshop_items(quiet=True))
             else:
                 self.root.after(0, lambda: self.api_key_status_var.set("API key: failed"))
                 self.root.after(0, lambda: self.log(f"API key check failed: {detail}"))
@@ -1260,6 +1262,8 @@ class WorkshopUploader:
             self.manage_identity_var.set(steam_id)
             self.owner_status_var.set(f"Workshop owner: {steam_id}")
             self.log(f"Resolved Workshop owner: {steam_id}")
+            if not quiet:
+                self.root.after(0, lambda: self.refresh_workshop_items(quiet=True))
             return steam_id
 
         self.owner_status_var.set("Workshop owner: could not resolve")
@@ -1318,6 +1322,62 @@ class WorkshopUploader:
             self.steamcmd_status_var.set("SteamCMD: found")
         else:
             self.steamcmd_status_var.set("SteamCMD: not found")
+
+    def _sync_steam_identity_from_local_state(self):
+        exe = self.steamcmd_path.get().strip()
+        if not exe or not os.path.exists(exe):
+            self.steam_login_status_var.set("Steam login: SteamCMD unavailable")
+            return None
+
+        cached = self._get_steam_service().detect_cached_steamcmd_identity(exe)
+        if cached:
+            self.use_cached_creds_var.set(True)
+            if not self.username_var.get().strip() and cached.get("account_name"):
+                self.username_var.set(cached["account_name"])
+            if not self.manage_identity_var.get().strip():
+                self.manage_identity_var.set(cached["steamid"])
+            display_name = cached.get("persona_name") or cached.get("account_name") or cached["steamid"]
+            self.steam_login_status_var.set(f"Steam login: cached {display_name}")
+            self.owner_status_var.set(f"Workshop owner: {cached['steamid']}")
+            self.log(f"Detected cached SteamCMD login: {display_name} ({cached['steamid']})")
+            return cached
+
+        self.use_cached_creds_var.set(False)
+        local_account = self.detect_local_steam_identity()
+        if local_account:
+            if not self.username_var.get().strip() and local_account.get("account_name"):
+                self.username_var.set(local_account["account_name"])
+            if not self.manage_identity_var.get().strip():
+                self.manage_identity_var.set(local_account["steamid"])
+            display_name = local_account.get("persona_name") or local_account.get("account_name") or local_account["steamid"]
+            self.owner_status_var.set(f"Workshop owner: {local_account['steamid']}")
+            self.steam_login_status_var.set(f"Steam login: sign-in required ({display_name} detected)")
+            self.log(f"Steam user detected, but SteamCMD has no cached login: {display_name} ({local_account['steamid']})")
+            return local_account
+
+        self.steam_login_status_var.set("Steam login: sign-in required")
+        return None
+
+    def _bootstrap_steam_environment(self):
+        configured = self.steamcmd_path.get().strip()
+        detected = self._get_steam_service().detect_steamcmd(
+            configured_path=configured,
+            base_dir=self.base_dir,
+        )
+        if detected:
+            if detected != configured:
+                self.steamcmd_path.set(detected)
+                self.log(f"Auto-detected SteamCMD: {detected}")
+            self._refresh_steamcmd_status()
+            self._sync_steam_identity_from_local_state()
+            self.save_config()
+        else:
+            self.steamcmd_status_var.set("SteamCMD: not found")
+            self.steam_login_status_var.set("Steam login: SteamCMD unavailable")
+            self.log("SteamCMD was not found automatically; Browse or Auto-DL remains available.")
+
+        if self.api_key_var.get().strip() and self.manage_identity_var.get().strip():
+            self.refresh_workshop_items(quiet=True)
 
     def on_close(self):
         self.save_config()
@@ -1862,7 +1922,10 @@ class WorkshopUploader:
 
     def browse_steamcmd(self):
         f = filedialog.askopenfilename(filetypes=[("Executable", "*.exe")])
-        if f: self.steamcmd_path.set(f)
+        if f:
+            self.steamcmd_path.set(f)
+            self._sync_steam_identity_from_local_state()
+            self.save_config()
 
     def download_steamcmd(self):
         if not messagebox.askyesno("Confirm Download", "This will download SteamCMD from Valve's servers and extract it to a 'steamcmd' folder in your app directory. Continue?"):
@@ -1873,7 +1936,11 @@ class WorkshopUploader:
         def _worker():
             try:
                 exe_path = self._get_file_manager().download_steamcmd(self.base_dir, self._request_with_retry)
-                self.root.after(0, lambda: self.steamcmd_path.set(exe_path))
+                def apply_downloaded_path():
+                    self.steamcmd_path.set(exe_path)
+                    self._sync_steam_identity_from_local_state()
+                    self.save_config()
+                self.root.after(0, apply_downloaded_path)
                 self.log("SteamCMD successfully downloaded and extracted.")
                 self.root.after(0, lambda: messagebox.showinfo("Success", "SteamCMD downloaded and path set automatically."))
             except Exception as e:
@@ -2487,23 +2554,28 @@ class WorkshopUploader:
         self.owner_status_var.set(f"Workshop owner: {account['steamid']}")
         self.steam_login_status_var.set(f"Steam login: detected {display_name}")
         self.log(f"Detected Steam login: {display_name} ({account['steamid']})")
+        if self.api_key_var.get().strip():
+            self.refresh_workshop_items(quiet=True)
 
-    def refresh_workshop_items(self):
-        if not self.api_key_var.get():
-            messagebox.showerror("Error", "Steam Web API Key is required for this feature.")
+    def refresh_workshop_items(self, quiet=False):
+        if not self.api_key_var.get().strip():
+            if not quiet:
+                messagebox.showerror("Error", "Steam Web API Key is required for this feature.")
             self.api_key_status_var.set("API key: missing")
-            return
+            return False
 
         identity_input = self.resolve_owner_identity(quiet=True)
         if not identity_input:
-            messagebox.showerror("Error", "Enter SteamID64/Profile URL/Vanity in the Workshop Library panel, or use 'USE CURRENT LOGIN'.")
-            return
+            if not quiet:
+                messagebox.showerror("Error", "Enter SteamID64/Profile URL/Vanity in the Workshop Library panel, or use 'USE CURRENT LOGIN'.")
+            return False
 
         self.save_config()
         self.log("Fetching all Workshop items...")
-        self.library_status_var.set("Loading Workshop library pages...")
+        self.library_status_var.set("Loading all Workshop items...")
         self._set_busy("Refresh", True)
         threading.Thread(target=self._refresh_worker, args=(identity_input,), daemon=True).start()
+        return True
 
     def _refresh_worker(self, identity_input):
         try:
@@ -2537,6 +2609,7 @@ class WorkshopUploader:
             pages = meta.get("pages", 0)
             total = meta.get("total", len(items))
             self.root.after(0, lambda: self.library_status_var.set(f"Loaded {len(items)} of {total} Workshop items for {steam_id} across {pages} page(s)."))
+            self.root.after(0, lambda: self.log(f"Workshop library ready: {len(items)} item(s) loaded across {pages} page(s)."))
 
         except Exception as e:
             self.root.after(0, lambda: self.library_status_var.set("Workshop library load failed."))
