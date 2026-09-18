@@ -675,6 +675,23 @@ class TestWorkshopUploader(unittest.TestCase):
 
         self.assertEqual(detected, os.path.abspath(steamcmd_path))
 
+    def test_steam_service_detects_cached_steamcmd_identity(self):
+        steamcmd_dir = os.path.join(self.test_dir, "steamcmd")
+        config_dir = os.path.join(steamcmd_dir, "config")
+        os.makedirs(config_dir, exist_ok=True)
+        steamcmd_path = os.path.join(steamcmd_dir, "steamcmd.exe")
+        with open(steamcmd_path, "w", encoding="utf-8") as f:
+            f.write("stub")
+        loginusers = os.path.join(config_dir, "loginusers.vdf")
+        with open(loginusers, "w", encoding="utf-8") as f:
+            f.write('"users"\n{\n"76561198000000001"\n{\n"AccountName" "alpha"\n"PersonaName" "Alpha User"\n"MostRecent" "1"\n}\n}\n')
+
+        account = self.uploader.steam_service.detect_cached_steamcmd_identity(steamcmd_path)
+
+        self.assertIsNotNone(account)
+        self.assertEqual(account["steamid"], "76561198000000001")
+        self.assertEqual(account["account_name"], "alpha")
+
     def test_resolving_owner_schedules_library_refresh(self):
         self.uploader.api_key_var = DummyVar("key")
         self.uploader.manage_identity_var = DummyVar("grizzly")
